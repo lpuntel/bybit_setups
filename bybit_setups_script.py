@@ -43,7 +43,7 @@ PERMITIR_FIM_DE_SEMANA = True
 
 # === CAMINHO DO ARQUIVO EXCEL COM ATIVOS ===
 # >>> AJUSTE O CAMINHO CONFORME SEU COMPUTADOR <<<
-ARQUIVO_EXCEL = r"G:\\Meu Drive\\INVESTIMENTOS VARIAVEL\\Bybit\\Bybit_Setups\\ativos.xlsx"
+ARQUIVO_EXCEL = "ativos.xlsx"
 
 """
 Este script identifica os setups 9.1 a 9.4 (Larry Williams) e PC (Ponto Contínuo),
