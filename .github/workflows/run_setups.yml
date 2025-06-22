@@ -1,1 +1,36 @@
+name: Executar Bybit Setups
+
+on:
+  workflow_dispatch:       # Execução manual
+  schedule:
+    - cron: '0 */4 * * *'  # A cada 4 horas (UTC)
+
+jobs:
+  run_script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Clonar repositório
+        uses: actions/checkout@v3
+
+      - name: 🐍 Configurar ambiente Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🚀 Executar script
+        run: python bybit_setups_script.py
+
+      - name: 📝 Commitar ativos_opt.xlsx no repositório
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@users.noreply.github.com"
+          git add ativos_opt.xlsx
+          git commit -m "Atualização automática do ativos_opt.xlsx"
+          git push
 
