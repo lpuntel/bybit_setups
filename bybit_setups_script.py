@@ -36,7 +36,7 @@ DEBUG_MODE = True  # Para exibir mensagens detalhadas no futuro (opcional)
 
 # Parâmetros de Horário de Execução
 USAR_HORARIO_LOCAL = True
-HORA_INICIO = 6
+HORA_INICIO = 0
 HORA_FIM = 23
 INTERVALO_MINUTOS = 1
 PERMITIR_FIM_DE_SEMANA = True
