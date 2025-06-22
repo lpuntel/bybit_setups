@@ -2,5 +2,6 @@ pandas
 openpyxl
 requests
 mplfinance
+matplotlib
 xlsxwriter
 pybit
