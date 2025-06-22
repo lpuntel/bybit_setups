@@ -15,7 +15,9 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from io import BytesIO
 
-
+#Salvar no Google Drive
+from pydrive.auth import GoogleAuth
+from pydrive.drive import GoogleDrive
 
 # Desativa logs de DEBUG do matplotlib e mplfinance
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
@@ -284,6 +286,17 @@ def dentro_do_horario():
             return True
 
     return False
+
+#Salvar no Google Drive a partir do RENDER
+def enviar_para_google_drive(nome_arquivo):
+    gauth = GoogleAuth()
+    gauth.LocalWebserverAuth()  # Usa navegador local apenas no primeiro login
+
+    drive = GoogleDrive(gauth)
+    arquivo = drive.CreateFile({'title': nome_arquivo})
+    arquivo.SetContentFile(nome_arquivo)
+    arquivo.Upload()
+    print(f"✅ Arquivo '{nome_arquivo}' enviado para o Google Drive com sucesso!")
 
 # === Setups de Larry Williams ===
 # === SETUP 9.1 ===
@@ -1101,5 +1114,10 @@ if __name__ == "__main__":
     except Exception as e:
         logging.error(f"❌ Erro ao salvar CSV: {e}")
 
+
+    #Chamada da função para envio ao Google Drive no RENDER
+    enviar_para_google_drive("ativos_opt.xlsx")
+
+    
     logging.info("-" * 60)
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
