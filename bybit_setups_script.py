@@ -14,10 +14,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from io import BytesIO
+from dotenv import load_dotenv
 
 #Salvar no Google Drive
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
+load_dotenv()
 
 # Desativa logs de DEBUG do matplotlib e mplfinance
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
