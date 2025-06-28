@@ -17,9 +17,6 @@ from io import BytesIO
 from dotenv import load_dotenv
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-from pydrive2.settings import InvalidConfigError
-from oauth2client.service_account import ServiceAccountCredentials
-from google.auth.transport.requests import Request
 import os
 
 # Desativa logs de DEBUG do matplotlib e mplfinance
@@ -304,25 +301,18 @@ def enviar_para_google_drive(nome_arquivo_local):
         print("[❌] Variáveis de ambiente do Google Drive não configuradas corretamente.")
         return
 
-    # Configuração direta
+    # Configura autenticação com refresh_token (sem navegador)
     gauth = GoogleAuth()
-    gauth.settings['client_config_backend'] = 'settings'
-    gauth.settings['client_config'] = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob"
-    }
-    gauth.credentials = gauth.RefreshToken({
-        'client_id': client_id,
-        'client_secret': client_secret,
-        'refresh_token': refresh_token,
-        'type': 'authorized_user'
-    })
+    gauth.credentials = gauth.auth_plugin_class(
+        client_id=client_id,
+        client_secret=client_secret,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token"
+    ).GetCredentials()
 
     drive = GoogleDrive(gauth)
 
+    # Cria o arquivo no Drive
     file_drive = drive.CreateFile({
         'title': nome_arquivo_local,
         'parents': [{'id': folder_id}] if folder_id else []
