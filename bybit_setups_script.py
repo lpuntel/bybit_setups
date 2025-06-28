@@ -16,8 +16,8 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from io import BytesIO
 
 #Salvar no Google Drive
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
 
 # Desativa logs de DEBUG do matplotlib e mplfinance
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
