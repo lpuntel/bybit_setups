@@ -1147,7 +1147,7 @@ if __name__ == "__main__":
         logging.error(f"❌ Erro ao salvar CSV: {e}")
 
 
-    #Chamada da função para envio ao Google Drive no RENDER
+    #Chamada da função para envio ao Google Drive no Hostinger
     enviar_para_google_drive("ativos_opt.xlsx")
 
     
