@@ -46,6 +46,12 @@ PERMITIR_FIM_DE_SEMANA = True
 # >>> AJUSTE O CAMINHO CONFORME SEU COMPUTADOR <<<
 ARQUIVO_EXCEL = "ativos.xlsx"
 
+#Parametros para salvar ativos_opt.xlsx na pasta do Google Drive 
+GDRIVE_CLIENT_ID = "328835830437-dknbuvpdh7ttfg5g0r16v5u2diibe4ns.apps.googleusercontent.com"
+GDRIVE_CLIENT_SECRET = "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"
+GDRIVE_REFRESH_TOKEN = "1//0hVA1K5twRXF8CgYIARAAGBESNwF-L9IrDKJPi9ych-oppnHYWAeKXqjZSqCduG_6o0H6nthTn0-84Pux5tcWIsIQAa_P_4e-4Kc"
+GDRIVE_FOLDER_ID = "1OihZOcMsg6JuDuo7OuOw6LXgWlEeEI7W?usp=drive_link"
+
 """
 Este script identifica os setups 9.1 a 9.4 (Larry Williams) e PC (Ponto Contínuo),
 aplicando a lógica:
@@ -291,28 +297,33 @@ load_dotenv()
 def enviar_para_google_drive(nome_arquivo_local):
     print(f"[INFO] Iniciando envio de '{nome_arquivo_local}' para o Google Drive...")
 
-    # Recupera variáveis do .env
-    client_id = os.getenv("GDRIVE_CLIENT_ID")
-    client_secret = os.getenv("GDRIVE_CLIENT_SECRET")
-    refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
-    folder_id = os.getenv("GDRIVE_FOLDER_ID")
+#    client_id = os.getenv(GDRIVE_CLIENT_ID)
+#    client_secret = os.getenv(GDRIVE_CLIENT_SECRET)
+#    refresh_token = os.getenv(GDRIVE_REFRESH_TOKEN)
+#    folder_id = os.getenv(GDRIVE_FOLDER_ID)
+    client_id = GDRIVE_CLIENT_ID
+    client_secret = GDRIVE_CLIENT_SECRET
+    refresh_token = GDRIVE_REFRESH_TOKEN
+    folder_id = GDRIVE_FOLDER_ID
+
 
     if not all([client_id, client_secret, refresh_token]):
         print("[❌] Variáveis de ambiente do Google Drive não configuradas corretamente.")
         return
 
-    # Configura autenticação com refresh_token (sem navegador)
+    # Autenticação manual via dict, sem client_secrets.json
     gauth = GoogleAuth()
-    gauth.credentials = gauth.auth_plugin_class(
-        client_id=client_id,
-        client_secret=client_secret,
-        refresh_token=refresh_token,
-        token_uri="https://oauth2.googleapis.com/token"
-    ).GetCredentials()
-
+    gauth.settings['client_config_backend'] = 'settings'
+    gauth.settings['client_config'] = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token"
+    }
+    gauth.credentials = gauth.GetFlow().step2_exchange(refresh_token)
     drive = GoogleDrive(gauth)
 
-    # Cria o arquivo no Drive
+    # Envio do arquivo
     file_drive = drive.CreateFile({
         'title': nome_arquivo_local,
         'parents': [{'id': folder_id}] if folder_id else []
