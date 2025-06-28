@@ -330,6 +330,7 @@ def enviar_para_google_drive(nome_arquivo_local):
     novo_arquivo.SetContentFile(nome_arquivo_local)
     novo_arquivo.Upload()
     print(f"✅ Arquivo '{nome_arquivo_local}' enviado para o Google Drive.")
+
 # === Setups de Larry Williams ===
 # === SETUP 9.1 ===
 def setup_9_1(df, ativo=""):
