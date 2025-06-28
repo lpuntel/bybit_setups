@@ -287,17 +287,47 @@ def dentro_do_horario():
 
     return False
 
-#Salvar no Google Drive a partir do RENDER
-def enviar_para_google_drive(nome_arquivo):
+#Salvar no Google Drive a partir do Hostinger
+def enviar_para_google_drive(nome_arquivo_local):
     gauth = GoogleAuth()
-    gauth.LocalWebserverAuth()  # Usa navegador local apenas no primeiro login
+    gauth.LoadSettings()
+
+    # Define credenciais diretamente
+    gauth.settings['client_config_backend'] = 'settings'
+    gauth.settings['client_config'] = {
+        "client_id": os.environ['GDRIVE_CLIENT_ID'],
+        "client_secret": os.environ['GDRIVE_CLIENT_SECRET'],
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"]
+    }
+    gauth.credentials = {
+        "refresh_token": os.environ['GDRIVE_REFRESH_TOKEN'],
+        "client_id": os.environ['GDRIVE_CLIENT_ID'],
+        "client_secret": os.environ['GDRIVE_CLIENT_SECRET'],
+        "token_uri": "https://oauth2.googleapis.com/token"
+    }
+    gauth.Authorize()
 
     drive = GoogleDrive(gauth)
-    arquivo = drive.CreateFile({'title': nome_arquivo})
-    arquivo.SetContentFile(nome_arquivo)
-    arquivo.Upload()
-    print(f"✅ Arquivo '{nome_arquivo}' enviado para o Google Drive com sucesso!")
 
+    pasta_id = os.environ.get('GDRIVE_FOLDER_ID')  # Pode estar em branco
+
+    # Verifica se o arquivo já existe (e apaga, se necessário)
+    query = f"title='{nome_arquivo_local}'"
+    if pasta_id:
+        query += f" and '{pasta_id}' in parents"
+
+    lista = drive.ListFile({'q': query}).GetList()
+    for arquivo in lista:
+        arquivo.Delete()
+
+    novo_arquivo = drive.CreateFile({'title': nome_arquivo_local})
+    if pasta_id:
+        novo_arquivo['parents'] = [{'id': pasta_id}]
+    novo_arquivo.SetContentFile(nome_arquivo_local)
+    novo_arquivo.Upload()
+    print(f"✅ Arquivo '{nome_arquivo_local}' enviado para o Google Drive.")
 # === Setups de Larry Williams ===
 # === SETUP 9.1 ===
 def setup_9_1(df, ativo=""):
