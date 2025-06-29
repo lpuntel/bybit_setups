@@ -47,10 +47,10 @@ PERMITIR_FIM_DE_SEMANA = True
 ARQUIVO_EXCEL = "ativos.xlsx"
 
 #Parametros para salvar ativos_opt.xlsx na pasta do Google Drive 
-GDRIVE_CLIENT_ID = "328835830437-dknbuvpdh7ttfg5g0r16v5u2diibe4ns.apps.googleusercontent.com"
-GDRIVE_CLIENT_SECRET = "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"
-GDRIVE_REFRESH_TOKEN = "1//0hVA1K5twRXF8CgYIARAAGBESNwF-L9IrDKJPi9ych-oppnHYWAeKXqjZSqCduG_6o0H6nthTn0-84Pux5tcWIsIQAa_P_4e-4Kc"
-GDRIVE_FOLDER_ID = "1OihZOcMsg6JuDuo7OuOw6LXgWlEeEI7W?usp=drive_link"
+#GDRIVE_CLIENT_ID = "328835830437-dknbuvpdh7ttfg5g0r16v5u2diibe4ns.apps.googleusercontent.com"
+#GDRIVE_CLIENT_SECRET = "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"
+#GDRIVE_REFRESH_TOKEN = "1//0hVA1K5twRXF8CgYIARAAGBESNwF-L9IrDKJPi9ych-oppnHYWAeKXqjZSqCduG_6o0H6nthTn0-84Pux5tcWIsIQAa_P_4e-4Kc"
+#GDRIVE_FOLDER_ID = "1OihZOcMsg6JuDuo7OuOw6LXgWlEeEI7W?usp=drive_link"
 
 """
 Este script identifica os setups 9.1 a 9.4 (Larry Williams) e PC (Ponto Contínuo),
@@ -297,14 +297,14 @@ load_dotenv()
 def enviar_para_google_drive(nome_arquivo_local):
     print(f"[INFO] Iniciando envio de '{nome_arquivo_local}' para o Google Drive...")
 
-#    client_id = os.getenv(GDRIVE_CLIENT_ID)
-#    client_secret = os.getenv(GDRIVE_CLIENT_SECRET)
-#    refresh_token = os.getenv(GDRIVE_REFRESH_TOKEN)
-#    folder_id = os.getenv(GDRIVE_FOLDER_ID)
-    client_id = GDRIVE_CLIENT_ID
-    client_secret = GDRIVE_CLIENT_SECRET
-    refresh_token = GDRIVE_REFRESH_TOKEN
-    folder_id = GDRIVE_FOLDER_ID
+    client_id = os.getenv("GDRIVE_CLIENT_ID")
+    client_secret = os.getenv("GDRIVE_CLIENT_SECRET")
+    refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
+    folder_id = os.getenv("GDRIVE_FOLDER_ID")
+#    client_id = GDRIVE_CLIENT_ID
+#    client_secret = GDRIVE_CLIENT_SECRET
+#    refresh_token = GDRIVE_REFRESH_TOKEN
+#    folder_id = GDRIVE_FOLDER_ID
 
 
     if not all([client_id, client_secret, refresh_token]):
