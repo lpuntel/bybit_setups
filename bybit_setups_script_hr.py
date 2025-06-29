@@ -1214,7 +1214,7 @@ if __name__ == "__main__":
 
     # === SALVAMENTO E ENCERRAMENTO FINAL ===
     # Salva a planilha Excel original
-    ARQUIVO_EXCEL_OPT = "ativos_opt.xlsx"
+    ARQUIVO_EXCEL_OPT = "ativos_opt_hr.xlsx"
     try:
         gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo=ARQUIVO_EXCEL_OPT)
         logging.info(f"✅ Arquivo '{ARQUIVO_EXCEL_OPT}' salvo com sucesso com dados e gráficos.")
