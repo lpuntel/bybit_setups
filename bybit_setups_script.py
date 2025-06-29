@@ -301,29 +301,41 @@ def enviar_para_google_drive(nome_arquivo_local):
     client_secret = os.getenv("GDRIVE_CLIENT_SECRET")
     refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
     folder_id = os.getenv("GDRIVE_FOLDER_ID")
-#    client_id = GDRIVE_CLIENT_ID
-#    client_secret = GDRIVE_CLIENT_SECRET
-#    refresh_token = GDRIVE_REFRESH_TOKEN
-#    folder_id = GDRIVE_FOLDER_ID
-
 
     if not all([client_id, client_secret, refresh_token]):
         print("[❌] Variáveis de ambiente do Google Drive não configuradas corretamente.")
         return
 
-    # Autenticação manual via dict, sem client_secrets.json
+    # Define o dicionário completo com todos os campos exigidos pelo PyDrive2
     gauth = GoogleAuth()
     gauth.settings['client_config_backend'] = 'settings'
     gauth.settings['client_config'] = {
         "client_id": client_id,
         "client_secret": client_secret,
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token"
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "revoke_uri": "https://oauth2.googleapis.com/revoke"
     }
-    gauth.credentials = gauth.GetFlow().step2_exchange(refresh_token)
+
+    gauth.settings['save_credentials'] = False
+    gauth.settings['oauth_scope'] = ["https://www.googleapis.com/auth/drive.file"]
+
+    # Força autenticação com refresh token
+    from oauth2client.client import OAuth2Credentials
+    gauth.credentials = OAuth2Credentials(
+        access_token=None,
+        client_id=client_id,
+        client_secret=client_secret,
+        refresh_token=refresh_token,
+        token_expiry=None,
+        token_uri="https://oauth2.googleapis.com/token",
+        user_agent=None,
+        revoke_uri="https://oauth2.googleapis.com/revoke"
+    )
+
     drive = GoogleDrive(gauth)
 
-    # Envio do arquivo
+    # Envia arquivo
     file_drive = drive.CreateFile({
         'title': nome_arquivo_local,
         'parents': [{'id': folder_id}] if folder_id else []
