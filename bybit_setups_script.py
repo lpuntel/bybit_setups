@@ -14,16 +14,15 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from io import BytesIO
-
-#Salvar no Google Drive
+from dotenv import load_dotenv
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
+import os
 
 # Desativa logs de DEBUG do matplotlib e mplfinance
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.getLogger('PIL').setLevel(logging.WARNING)
 matplotlib.set_loglevel('warning')  # Apenas se sua versão do matplotlib suportar
-
 
 # === CONFIGURAÇÕES INICIAIS ===
 PERIODOS_TENDENCIA = 10  # Número de candles para confirmar tendência predominante (usado no 9.1)
@@ -46,6 +45,12 @@ PERMITIR_FIM_DE_SEMANA = True
 # === CAMINHO DO ARQUIVO EXCEL COM ATIVOS ===
 # >>> AJUSTE O CAMINHO CONFORME SEU COMPUTADOR <<<
 ARQUIVO_EXCEL = "ativos.xlsx"
+
+#Parametros para salvar ativos_opt.xlsx na pasta do Google Drive 
+#GDRIVE_CLIENT_ID = "328835830437-dknbuvpdh7ttfg5g0r16v5u2diibe4ns.apps.googleusercontent.com"
+#GDRIVE_CLIENT_SECRET = "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"
+#GDRIVE_REFRESH_TOKEN = "1//0hVA1K5twRXF8CgYIARAAGBESNwF-L9IrDKJPi9ych-oppnHYWAeKXqjZSqCduG_6o0H6nthTn0-84Pux5tcWIsIQAa_P_4e-4Kc"
+#GDRIVE_FOLDER_ID = "1OihZOcMsg6JuDuo7OuOw6LXgWlEeEI7W?usp=drive_link"
 
 """
 Este script identifica os setups 9.1 a 9.4 (Larry Williams) e PC (Ponto Contínuo),
@@ -288,46 +293,58 @@ def dentro_do_horario():
     return False
 
 #Salvar no Google Drive a partir do Hostinger
+load_dotenv()
 def enviar_para_google_drive(nome_arquivo_local):
-    gauth = GoogleAuth()
-    gauth.LoadSettings()
+    print(f"[INFO] Iniciando envio de '{nome_arquivo_local}' para o Google Drive...")
 
-    # Define credenciais diretamente
+    client_id = os.getenv("GDRIVE_CLIENT_ID")
+    client_secret = os.getenv("GDRIVE_CLIENT_SECRET")
+    refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
+    folder_id = os.getenv("GDRIVE_FOLDER_ID")
+
+    if not all([client_id, client_secret, refresh_token]):
+        print("[❌] Variáveis de ambiente do Google Drive não configuradas corretamente.")
+        return
+
+    # Define o dicionário completo com todos os campos exigidos pelo PyDrive2
+    gauth = GoogleAuth()
     gauth.settings['client_config_backend'] = 'settings'
     gauth.settings['client_config'] = {
-        "client_id": os.environ['GDRIVE_CLIENT_ID'],
-        "client_secret": os.environ['GDRIVE_CLIENT_SECRET'],
+        "client_id": client_id,
+        "client_secret": client_secret,
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"]
+        "revoke_uri": "https://oauth2.googleapis.com/revoke"
     }
-    gauth.credentials = {
-        "refresh_token": os.environ['GDRIVE_REFRESH_TOKEN'],
-        "client_id": os.environ['GDRIVE_CLIENT_ID'],
-        "client_secret": os.environ['GDRIVE_CLIENT_SECRET'],
-        "token_uri": "https://oauth2.googleapis.com/token"
-    }
-    gauth.Authorize()
+
+    gauth.settings['save_credentials'] = False
+    gauth.settings['oauth_scope'] = ["https://www.googleapis.com/auth/drive.file"]
+
+    # Força autenticação com refresh token
+    from oauth2client.client import OAuth2Credentials
+    gauth.credentials = OAuth2Credentials(
+        access_token=None,
+        client_id=client_id,
+        client_secret=client_secret,
+        refresh_token=refresh_token,
+        token_expiry=None,
+        token_uri="https://oauth2.googleapis.com/token",
+        user_agent=None,
+        revoke_uri="https://oauth2.googleapis.com/revoke"
+    )
 
     drive = GoogleDrive(gauth)
 
-    pasta_id = os.environ.get('GDRIVE_FOLDER_ID')  # Pode estar em branco
+    # Envia arquivo
+    file_drive = drive.CreateFile({
+        'title': nome_arquivo_local,
+        'parents': [{'id': folder_id}] if folder_id else []
+    })
+    file_drive.SetContentFile(nome_arquivo_local)
+    file_drive.Upload()
 
-    # Verifica se o arquivo já existe (e apaga, se necessário)
-    query = f"title='{nome_arquivo_local}'"
-    if pasta_id:
-        query += f" and '{pasta_id}' in parents"
+    print(f"[✅] Arquivo '{nome_arquivo_local}' enviado com sucesso ao Google Drive.")
 
-    lista = drive.ListFile({'q': query}).GetList()
-    for arquivo in lista:
-        arquivo.Delete()
-
-    novo_arquivo = drive.CreateFile({'title': nome_arquivo_local})
-    if pasta_id:
-        novo_arquivo['parents'] = [{'id': pasta_id}]
-    novo_arquivo.SetContentFile(nome_arquivo_local)
-    novo_arquivo.Upload()
-    print(f"✅ Arquivo '{nome_arquivo_local}' enviado para o Google Drive.")
 # === Setups de Larry Williams ===
 # === SETUP 9.1 ===
 def setup_9_1(df, ativo=""):
@@ -1145,7 +1162,7 @@ if __name__ == "__main__":
         logging.error(f"❌ Erro ao salvar CSV: {e}")
 
 
-    #Chamada da função para envio ao Google Drive no RENDER
+    #Chamada da função para envio ao Google Drive no Hostinger
     enviar_para_google_drive("ativos_opt.xlsx")
 
     
