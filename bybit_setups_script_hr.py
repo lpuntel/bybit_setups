@@ -1214,7 +1214,9 @@ if __name__ == "__main__":
 
     # === SALVAMENTO E ENCERRAMENTO FINAL ===
     # Salva a planilha Excel original
+
     ARQUIVO_EXCEL_OPT = "ativos_opt_hr.xlsx"
+
     try:
         gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo=ARQUIVO_EXCEL_OPT)
         logging.info(f"✅ Arquivo '{ARQUIVO_EXCEL_OPT}' salvo com sucesso com dados e gráficos.")
@@ -1231,7 +1233,6 @@ if __name__ == "__main__":
 
 
     #Chamada da função para envio ao Google Drive no Hostinger
-#    enviar_para_google_drive("ativos_opt.xlsx") #Comentado para não gerar ativo_opt, ativo_opt(1), ativo_opt(2), etc...
     upload_file_to_drive('ativos_opt_hr.xlsx', os.environ.get("GDRIVE_FOLDER_ID")) #Grava sempre o mesmo arquivo ativos_opt_hr.xlsx
 
     logging.info("-" * 60)
