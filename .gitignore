@@ -1,3 +1,7 @@
 .env
 .env
 .env
+ativos_opt.xlsx
+ativos_opt_hr.xlsx
+dados_candles.csv
+log_cron.txt
