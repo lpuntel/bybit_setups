@@ -69,6 +69,12 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 
+# Acrescenta logs também em arquivo (append)
+log_file_path = os.path.join(os.path.dirname(__file__), 'log_cron.txt')
+file_handler = logging.FileHandler(log_file_path, mode='a')
+file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+logging.getLogger().addHandler(file_handler)
+
 # Lista que armazenará dados de integridade dos candles
 dados_integridade = []
 
