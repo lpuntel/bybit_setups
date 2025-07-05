@@ -1243,3 +1243,8 @@ if __name__ == "__main__":
 
     logging.info("-" * 60)
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
+    # (coloque isso no final do script)
+    for handler in logging.getLogger().handlers:
+    handler.flush()
+    handler.close()
