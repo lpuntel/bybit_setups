@@ -1102,7 +1102,7 @@ if __name__ == "__main__":
                 'MMA21': mma21,
                 'Setup Identificado': ''   # Preenchido depois se setup for detectado
             })
-        logging.debug("." * 92)
+        logging.debug("+" * 92)
 
         resultado_final = None
         status_do_setup = "Nenhum"
@@ -1110,7 +1110,7 @@ if __name__ == "__main__":
         for func in [setup_9_1, setup_9_2, setup_9_3, setup_9_4, setup_pc]:
             resultado = func(df, ativo=par)
             logging.debug(f"  ▶️Resultado de {func.__name__}: {resultado}")
-            logging.debug("." * 92)
+            logging.debug("-" * 92)
             
             # BLOCO DE DISPARO
             if resultado and isinstance(resultado, dict) and resultado['status'].startswith("ARMAR"):
