@@ -26,14 +26,6 @@ logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.getLogger('PIL').setLevel(logging.WARNING)
 matplotlib.set_loglevel('warning')  # Apenas se sua versão do matplotlib suportar
 
-#apenas para teste... tirar depois até onde diz FIM
-import sys
-
-# Redireciona também para stdout e stderr
-print(">>> Iniciando execução do script...", file=sys.stdout)
-print(">>> Erros serão redirecionados para stdout...", file=sys.stderr)
-#####FIM###
-
 # === CONFIGURAÇÕES INICIAIS ===
 PERIODOS_TENDENCIA = 10  # Número de candles para confirmar tendência predominante (usado no 9.1)
 PERIODOS_SEQUENCIA_TENDENCIA = 10  # Número de candles consecutivos para confirmar sequência de tendência (9.2, 9.3, 9.4, PC)
@@ -240,8 +232,6 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
 
     writer._save()
 #    print(f"✅ Arquivo gerado: {nome_arquivo}")
-    print("Salvando arquivo ativos_opt_hr.xlsx no Google Drive...") #só para teste, deletar depois
-
 
 # Função para buscar candles da Bybit
 def obter_candles(par='BTCUSDT', interval='15', limit=50, mercado='linear'):
@@ -306,56 +296,6 @@ def dentro_do_horario():
 
 #Salvar no Google Drive a partir do Hostinger
 load_dotenv()
-def enviar_para_google_drive(nome_arquivo_local):
-    print(f"[INFO] Iniciando envio de '{nome_arquivo_local}' para o Google Drive...")
-
-    client_id = os.getenv("GDRIVE_CLIENT_ID")
-    client_secret = os.getenv("GDRIVE_CLIENT_SECRET")
-    refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
-    folder_id = os.getenv("GDRIVE_FOLDER_ID")
-
-    if not all([client_id, client_secret, refresh_token]):
-        print("[❌] Variáveis de ambiente do Google Drive não configuradas corretamente.")
-        return
-
-    # Define o dicionário completo com todos os campos exigidos pelo PyDrive2
-    gauth = GoogleAuth()
-    gauth.settings['client_config_backend'] = 'settings'
-    gauth.settings['client_config'] = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "revoke_uri": "https://oauth2.googleapis.com/revoke"
-    }
-
-    gauth.settings['save_credentials'] = False
-    gauth.settings['oauth_scope'] = ["https://www.googleapis.com/auth/drive.file"]
-
-    # Força autenticação com refresh token
-    from oauth2client.client import OAuth2Credentials
-    gauth.credentials = OAuth2Credentials(
-        access_token=None,
-        client_id=client_id,
-        client_secret=client_secret,
-        refresh_token=refresh_token,
-        token_expiry=None,
-        token_uri="https://oauth2.googleapis.com/token",
-        user_agent=None,
-        revoke_uri="https://oauth2.googleapis.com/revoke"
-    )
-
-    drive = GoogleDrive(gauth)
-
-    # Envia arquivo
-    file_drive = drive.CreateFile({
-        'title': nome_arquivo_local,
-        'parents': [{'id': folder_id}] if folder_id else []
-    })
-    file_drive.SetContentFile(nome_arquivo_local)
-    file_drive.Upload()
-
-    print(f"[✅] Arquivo '{nome_arquivo_local}' enviado com sucesso ao Google Drive.")
 
 def upload_file_to_drive(local_file_path, drive_folder_id):
     """
@@ -1239,7 +1179,6 @@ if __name__ == "__main__":
         logging.info("📁 Arquivo 'dados_candles.csv' salvo com os candles mais recentes.")
     except Exception as e:
         logging.error(f"❌ Erro ao salvar CSV: {e}")
-
 
     #Chamada da função para envio ao Google Drive no Hostinger
     upload_file_to_drive('ativos_opt_hr.xlsx', os.environ.get("GDRIVE_FOLDER_ID")) #Grava sempre o mesmo arquivo ativos_opt_hr.xlsx
