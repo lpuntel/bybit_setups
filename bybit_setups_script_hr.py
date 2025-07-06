@@ -1159,7 +1159,7 @@ if __name__ == "__main__":
         if status_do_setup.startswith("ARMAR") or status_do_setup.startswith("DISPARAR"):
             mensagem = f"🚨 {par} | {resultado_final}"
             enviar_alerta_telegram(mensagem) # Cancelar para evitar muita informação no debgu
-        logging.debug("." * 92)
+        logging.debug("=" * 92)
 
     # === SALVAMENTO E ENCERRAMENTO FINAL ===
     # Salva a planilha Excel original
