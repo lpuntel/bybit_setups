@@ -114,7 +114,7 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
     # === ABA 1: Tabela de resultados ===
     colunas_saida = [
         'Par', 'Timeframe', 'Mercado', 'Time Stamp', 'Setup', 'COMPRA/VENDA', 'ARMAR/DISPARAR',
-        'GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME', 'VOLUME_MMA21', 'CLOSE_ZERO'
+        'GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME', 'VOLUME_MMA21', 'CLOSE_ZERO', 'OPEN_ZERO'
     ]
     tabela_saida = []
 
@@ -157,7 +157,8 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
                 candle_m1.get('MMA21', None),
                 float(candle_m1.get('volume', 0) or 0),
                 candle_m1.get('VOLUME_MMA21', None),
-                candle_zero['close']
+                candle_zero['close'],
+                candle_zero['open']
             ])
 
     df_saida = pd.DataFrame(tabela_saida, columns=colunas_saida)
@@ -172,7 +173,7 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
     formato_decimal = workbook.add_format({'num_format': '#,##0.00000000'})
     formato_volume = workbook.add_format({'num_format': '#,##0'})
 
-    colunas_float = ['GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME','VOLUME_MMA21', 'CLOSE_ZERO']
+    colunas_float = ['GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME','VOLUME_MMA21', 'CLOSE_ZERO', 'OPEN_ZERO']
     for col_nome in colunas_float:
         col_idx = df_saida.columns.get_loc(col_nome)
         worksheet_tabela.set_column(col_idx, col_idx, 18, formato_decimal)
