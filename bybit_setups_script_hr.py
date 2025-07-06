@@ -71,11 +71,11 @@ aplicando a lógica:
 """
 
 # Configuração central de logging
-#logging.basicConfig(
- #   level=logging.DEBUG if DEBUG_MODE else logging.INFO,
-  #  format='%(asctime)s [%(levelname)s] %(message)s',
-   # datefmt='%H:%M:%S'
-#)
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
 
 # Lista que armazenará dados de integridade dos candles
 dados_integridade = []
