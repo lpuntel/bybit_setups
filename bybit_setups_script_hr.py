@@ -69,12 +69,6 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 
-# Acrescenta logs também em arquivo (append)
-log_file_path = os.path.join(os.path.dirname(__file__), 'log_cron.txt')
-file_handler = logging.FileHandler(log_file_path, mode='a')
-file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
-logging.getLogger().addHandler(file_handler)
-
 # Lista que armazenará dados de integridade dos candles
 dados_integridade = []
 
@@ -539,7 +533,7 @@ def setup_9_2(df, ativo=""):
                 'debug_origem': 'COMPRA-ARMAR'
             }
     
-        print("-" * 92)   
+        logging.debug("." * 92)
         logging.debug(f"    Iniciando avaliação de escorregamento")
         candle_m1 = df.iloc[-1]
         candle_m2 = df.iloc[-2]
@@ -610,7 +604,7 @@ def setup_9_2(df, ativo=""):
                 'debug_origem': 'VENDA-ARMAR'
             }
 
-        print("-" * 92)   
+        logging.debug("." * 92)
         logging.debug(f"    Iniciando avaliação de escorregamento")
         candle_m1 = df.iloc[-1]
         candle_m2 = df.iloc[-2]
@@ -693,7 +687,7 @@ def setup_9_3(df, ativo=""):
                 'debug_origem': 'COMPRA-ARMAR'
             }
         
-        print("-" * 92)   
+        logging.debug("." * 92)
         logging.debug(f"    Iniciando avaliação de escorregamento")
         candle_m1 = df.iloc[-1]
         candle_m2 = df.iloc[-2]
@@ -764,7 +758,7 @@ def setup_9_3(df, ativo=""):
                 'debug_origem': 'VENDA-ARMAR'
             }
 
-        print("-" * 92)   
+        logging.debug("." * 92)
         logging.debug(f"    Iniciando avaliação de escorregamento")
         candle_m1 = df.iloc[-1]
         candle_m2 = df.iloc[-2]
@@ -970,7 +964,7 @@ def setup_pc(df, ativo=""):
                 'coluna': 'high',
                 'debug_origem': 'COMPRA-ARMAR'
             }
-        print ("-" * 92)
+        logging.debug("." * 92)
         logging.debug(f"    Iniciando avaliação de escorregamento")
 
         candle_m1 = df.iloc[-1]
@@ -1035,7 +1029,7 @@ def setup_pc(df, ativo=""):
                 'debug_origem': 'VENDA-ARMAR'
             }
 
-        print ("-" * 92)            
+        logging.debug("." * 92)
         logging.debug(f"    Iniciando avaliação de escorregamento")
 
         candle_m1 = df.iloc[-1]
@@ -1091,7 +1085,6 @@ if __name__ == "__main__":
 
     # Remove colunas duplicadas (mantém apenas a primeira ocorrência)
     ativos_df = ativos_df.loc[:, ~ativos_df.columns.duplicated(keep='first')]
-
 
     logging.info(f"Execução iniciada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     logging.info('*' * 92)
@@ -1159,7 +1152,7 @@ if __name__ == "__main__":
                 'MMA21': mma21,
                 'Setup Identificado': ''   # Preenchido depois se setup for detectado
             })
-        print("=" * 92)
+        logging.debug("." * 92)
 
         resultado_final = None
         status_do_setup = "Nenhum"
@@ -1167,7 +1160,7 @@ if __name__ == "__main__":
         for func in [setup_9_1, setup_9_2, setup_9_3, setup_9_4, setup_pc]:
             resultado = func(df, ativo=par)
             logging.debug(f"  ▶️Resultado de {func.__name__}: {resultado}")
-            print("=" * 92)
+            logging.debug("." * 92)
             
             # BLOCO DE DISPARO
             if resultado and isinstance(resultado, dict) and resultado['status'].startswith("ARMAR"):
@@ -1216,7 +1209,7 @@ if __name__ == "__main__":
         if status_do_setup.startswith("ARMAR") or status_do_setup.startswith("DISPARAR"):
             mensagem = f"🚨 {par} | {resultado_final}"
             enviar_alerta_telegram(mensagem) # Cancelar para evitar muita informação no debgu
-        print("+" * 92)
+        logging.debug("." * 92)
 
     # === SALVAMENTO E ENCERRAMENTO FINAL ===
     # Salva a planilha Excel original
@@ -1244,7 +1237,4 @@ if __name__ == "__main__":
     logging.info("-" * 60)
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
-    # (coloque isso no final do script)
-    for handler in logging.getLogger().handlers:
-    handler.flush()
-    handler.close()
+    
