@@ -35,7 +35,7 @@ PASSO_TENDENCIA_SUAVE = 2  # Intervalo usado para suavizar a comparação entre 
 PERIODOS_MINIMO = 30 #Número mínimo de períodos para considerar análise do ativo 
 CASAS_DECIMAIS_GATILHO = 7  # Número de casas decimais para exibir os gatilhos
 ENVIAR_ALERTA_TELEGRAM = True  # Enviar alertas automáticos via Telegram
-DEBUG_MODE = True  # Para exibir mensagens detalhadas no futuro (opcional)
+DEBUG_MODE = False  # Para exibir mensagens detalhadas no futuro (opcional)
 
 # Parâmetros de Horário de Execução
 USAR_HORARIO_LOCAL = True
