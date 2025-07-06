@@ -26,6 +26,14 @@ logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.getLogger('PIL').setLevel(logging.WARNING)
 matplotlib.set_loglevel('warning')  # Apenas se sua versão do matplotlib suportar
 
+#apenas para teste... tirar depois até onde diz FIM
+import sys
+
+# Redireciona também para stdout e stderr
+print(">>> Iniciando execução do script...", file=sys.stdout)
+print(">>> Erros serão redirecionados para stdout...", file=sys.stderr)
+#####FIM###
+
 # === CONFIGURAÇÕES INICIAIS ===
 PERIODOS_TENDENCIA = 10  # Número de candles para confirmar tendência predominante (usado no 9.1)
 PERIODOS_SEQUENCIA_TENDENCIA = 10  # Número de candles consecutivos para confirmar sequência de tendência (9.2, 9.3, 9.4, PC)
@@ -238,6 +246,8 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
 
     writer._save()
 #    print(f"✅ Arquivo gerado: {nome_arquivo}")
+    print("Salvando arquivo ativos_opt_hr.xlsx no Google Drive...") #só para teste, deletar depois
+
 
 # Função para buscar candles da Bybit
 def obter_candles(par='BTCUSDT', interval='15', limit=50, mercado='linear'):
@@ -1248,3 +1258,5 @@ if __name__ == "__main__":
     for handler in logging.getLogger().handlers:
     handler.flush()
     handler.close()
+    print(">>> Fim da execução do script.") #para fins de teste. deletar depois
+ 
