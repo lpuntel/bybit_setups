@@ -75,7 +75,7 @@ aplicando a lógica:
  #   level=logging.DEBUG if DEBUG_MODE else logging.INFO,
   #  format='%(asctime)s [%(levelname)s] %(message)s',
    # datefmt='%H:%M:%S'
-)
+#)
 
 # Acrescenta logs também em arquivo (append)
 log_file_path = os.path.join(os.path.dirname(__file__), 'log_cron.txt')
