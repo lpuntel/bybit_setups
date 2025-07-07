@@ -1038,7 +1038,7 @@ if __name__ == "__main__":
     ativos_df = ativos_df.loc[:, ~ativos_df.columns.duplicated(keep='first')]
 
     logging.info(f"Execução iniciada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    logging.info('*' * 92)
+    logging.debug('*' * 92)
 
     # Criando dicionário candles_dict
     candles_dict = {}
@@ -1073,17 +1073,17 @@ if __name__ == "__main__":
         df['MME9'] = df['close'].ewm(span=9).mean()
         df['MMA21'] = df['close'].rolling(window=21).mean()
 
-        logging.info(f"\n🔍 Verificando {par} ({timeframe} min - {mercado})")
+        logging.debug(f"\n🔍 Verificando {par} ({timeframe} min - {mercado})")
 
         # 🔍 Verifica e exibe os candles [-10] a [0]
-        logging.info("  🔍 Verificando integridade dos candles [-10] a [0]:")
+        logging.debug("  🔍 Verificando integridade dos candles [-10] a [0]:")
 
         for i in range(-10, 0):
             candle = df.iloc[i]
             mme9 = df['MME9'].iloc[i] if 'MME9' in df.columns else None
             mma21 = df['MMA21'].iloc[i] if 'MMA21' in df.columns else None
 
-            logging.info(
+            logging.debug(
                 f"     idx={i:>2} | time={candle['timestamp']} | "
                 f"o={candle['open']:.7f} h={candle['high']:.7f} l={candle['low']:.7f} c={candle['close']:.7f} "
                 f"| m9={mme9:.7f} | m21={mma21:.7f}"
@@ -1153,7 +1153,7 @@ if __name__ == "__main__":
         if resultado_final is None:
             resultado_final = f"Nenhum ({df['timestamp'].iloc[-1].strftime('%d/%m/%Y %H:%M:%S')})"
 
-        logging.info(f" >>>> {par}: {resultado_final}")
+        logging.debug(f" >>>> {par}: {resultado_final}")
         ativos_df.at[idx, 'Último Setup Identificado'] = resultado_final
 
         # Envio de alerta apenas para ARMAR ou DISPARAR
@@ -1184,6 +1184,6 @@ if __name__ == "__main__":
     #Chamada da função para envio ao Google Drive no Hostinger
     upload_file_to_drive('ativos_opt_hr.xlsx', os.environ.get("GDRIVE_FOLDER_ID")) #Grava sempre o mesmo arquivo ativos_opt_hr.xlsx
 
-    logging.info("-" * 60)
+    logging.debug("-" * 60)
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
