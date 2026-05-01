@@ -1,0 +1,26 @@
+{
+  "symbol": "ORCAUSDT",
+  "interval": "120",
+  "objective": "mar",
+  "best_params": {
+    "atr_period": 10,
+    "atr_method": "wilder",
+    "k_sl": 1.0,
+    "k_tp": 3.0,
+    "trailing": true,
+    "breakeven_after_rr": null,
+    "partial_tp_rr": null,
+    "partial_frac": 0.5,
+    "risk_model": "fixed_qty",
+    "fixed_qty": 1.0,
+    "fixed_risk_usd": 100.0,
+    "fractional_risk": 0.01,
+    "entry_reference": "after_signal",
+    "max_bars_in_trade": null
+  },
+  "best_score": {
+    "mar": 6.290392480862157,
+    "trades": 113.0
+  },
+  "generated_at": "2026-04-28 16:10:48"
+}

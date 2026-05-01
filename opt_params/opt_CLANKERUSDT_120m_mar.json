@@ -1,0 +1,26 @@
+{
+  "symbol": "CLANKERUSDT",
+  "interval": "120",
+  "objective": "mar",
+  "best_params": {
+    "atr_period": 21,
+    "atr_method": "wilder",
+    "k_sl": 1.25,
+    "k_tp": 5.0,
+    "trailing": false,
+    "breakeven_after_rr": null,
+    "partial_tp_rr": null,
+    "partial_frac": 0.5,
+    "risk_model": "fixed_qty",
+    "fixed_qty": 1.0,
+    "fixed_risk_usd": 100.0,
+    "fractional_risk": 0.01,
+    "entry_reference": "after_signal",
+    "max_bars_in_trade": null
+  },
+  "best_score": {
+    "mar": 0.054921047300454114,
+    "trades": 142.0
+  },
+  "generated_at": "2026-04-28 15:01:09"
+}
