@@ -1,6 +1,11 @@
+'''
+Versão Hostinger ajustada a partir do bybit_setups_script_lv.py.
+Mantém a execução no VPS, geração do ativos_opt_hr.xlsx e upload para Google Drive,
+incorporando SL/TP por ATR, parâmetros otimizados/cache JSON e cálculo de swings.
+'''
 # === IMPORTAÇÕES NECESSÁRIAS ===
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import requests
 from pybit.unified_trading import HTTP
 import logging
@@ -14,12 +19,38 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from io import BytesIO
+
+# Optimizer imceremnta SL e TP otimizado com base no histórico
+import json, os
+import argparse
 from dotenv import load_dotenv
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-from oauth2client.service_account import ServiceAccountCredentials  # not used for OAuth, just illustration
 from oauth2client.client import OAuth2Credentials
-import os
+from optimizer_atr_sl_tp import run_optimization_with_setups
+
+from pathlib import Path
+
+# Diretório base do script
+BASE_DIR = Path(__file__).resolve().parent
+# Pasta onde ficarão os JSONs de parâmetros
+DIRETORIO_OPT = BASE_DIR / "opt_params"
+DIRETORIO_OPT.mkdir(parents=True, exist_ok=True)
+REOTIMIZAR_APOS_DIAS = 7
+
+def normalize_timeframe(tf) -> str:
+    """Converte 15, '15', 15.0 -> '15' (string sem decimais)."""
+    try:
+        return str(int(float(tf)))
+    except Exception:
+        return str(tf).strip()
+
+# Define o fuso de Brasília (UTC-3)
+fuso_brasilia = timezone(timedelta(hours=-3))
+
+# Para usar o horário atual de Brasília:
+agora_brasilia = datetime.now(fuso_brasilia)
+#print("[INFO] Execução iniciada em horário de Brasília:", agora_brasilia.strftime("%Y-%m-%d %H:%M:%S"))
 
 # Desativa logs de DEBUG do matplotlib e mplfinance
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
@@ -28,8 +59,8 @@ matplotlib.set_loglevel('warning')  # Apenas se sua versão do matplotlib suport
 
 # === CONFIGURAÇÕES INICIAIS ===
 PERIODOS_TENDENCIA = 10  # Número de candles para confirmar tendência predominante (usado no 9.1)
-PERIODOS_SEQUENCIA_TENDENCIA = 10  # Número de candles consecutivos para confirmar sequência de tendência (9.2, 9.3, 9.4, PC)
-PERIODOS_TENDENCIA_SUAVE = 6
+PERIODOS_SEQUENCIA_TENDENCIA = 10  # Número de candles para confirmar tendência predominante (usado no 9.1)
+PERIODOS_TENDENCIA_SUAVE = 6  # Número de candles consecutivos para confirmar sequência de tendência (9.2, 9.3, 9.4, PC)
 
 PASSO_TENDENCIA_SUAVE = 2  # Intervalo usado para suavizar a comparação entre médias (ex: compara -9 com -11)
 PERIODOS_MINIMO = 30 #Número mínimo de períodos para considerar análise do ativo 
@@ -44,15 +75,14 @@ HORA_FIM = 23
 INTERVALO_MINUTOS = 1
 PERMITIR_FIM_DE_SEMANA = True
 
-# === CAMINHO DO ARQUIVO EXCEL COM ATIVOS ===
-# >>> AJUSTE O CAMINHO CONFORME SEU COMPUTADOR <<<
-ARQUIVO_EXCEL = "ativos.xlsx"
+# === PARÂMETROS SL/TP por ATR ===
+ATR_PERIODO_SLTP = 14
+K_SL_PADRAO = 1.5
+K_TP_PADRAO = 2.5
 
-#Parametros para salvar ativos_opt.xlsx na pasta do Google Drive 
-#GDRIVE_CLIENT_ID = "328835830437-dknbuvpdh7ttfg5g0r16v5u2diibe4ns.apps.googleusercontent.com"
-#GDRIVE_CLIENT_SECRET = "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"
-#GDRIVE_REFRESH_TOKEN = "1//0hVA1K5twRXF8CgYIARAAGBESNwF-L9IrDKJPi9ych-oppnHYWAeKXqjZSqCduG_6o0H6nthTn0-84Pux5tcWIsIQAa_P_4e-4Kc"
-#GDRIVE_FOLDER_ID = "1OihZOcMsg6JuDuo7OuOw6LXgWlEeEI7W?usp=drive_link"
+# ===   PARÂMETROS SWING ===
+SWING_LOOKBACK_9_1 = PERIODOS_SEQUENCIA_TENDENCIA
+SWING_LOOKBACK_SUAVE = PERIODOS_TENDENCIA_SUAVE + 4
 
 """
 Este script identifica os setups 9.1 a 9.4 (Larry Williams) e PC (Ponto Contínuo),
@@ -61,6 +91,10 @@ aplicando a lógica:
 - Candle [0]: DISPARAR, se houver rompimento
 - Setups 9.2, 9.3 e PC admitem escorregamento de gatilho
 """
+
+# === CAMINHO DO ARQUIVO EXCEL COM ATIVOS ===
+# >>> AJUSTE O CAMINHO CONFORME SEU COMPUTADOR <<<
+ARQUIVO_EXCEL = "ativos.xlsx"
 
 # Configuração central de logging
 logging.basicConfig(
@@ -106,7 +140,218 @@ def tendencia_suave(mme, tipo='alta', passo=2, periodo=PERIODOS_TENDENCIA_SUAVE)
 
     return True
 
-# Funções auxiliares de exportação e gráficos
+def compute_atr(df, period=14, method="wilder"):
+    """ATR clássico (Wilder por padrão) sobre colunas high/low/close."""
+    h, l, c = df['high'], df['low'], df['close']
+    prev_c = c.shift(1)
+    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    if method == "wilder":
+        atr = tr.ewm(alpha=1/period, adjust=False).mean()
+    elif method == "ema":
+        atr = tr.ewm(span=period, adjust=False).mean()
+    else:
+        atr = tr.rolling(period, min_periods=1).mean()
+    return atr
+
+def obter_intervalo_fixo_swing(df, lookback):
+    """
+    Retorna intervalo [idx_inicio, idx_fim] para swing por janela fixa.
+    Usa apenas candles fechados, portanto idx_fim = len(df_fechados)-1.
+    """
+    if df is None or df.empty:
+        return None, None
+
+    df_fechados = df.iloc[:-1].copy()
+    if len(df_fechados) < lookback:
+        return None, None
+
+    idx_fim = len(df_fechados) - 1
+    idx_inicio = max(0, len(df_fechados) - lookback)
+
+    return idx_inicio, idx_fim
+
+
+def obter_intervalo_estrutural_compra(df):
+    """
+    Para setups com escorregamento em COMPRA:
+    volta desde o último candle fechado enquanto as máximas seguem descendentes.
+    Usa o candle anterior ao início da sequência como início do swing, se existir.
+    """
+    if df is None or df.empty:
+        return None, None
+
+    df_fechados = df.iloc[:-1].copy()
+    n = len(df_fechados)
+
+    if n < 3:
+        return None, None
+
+    idx_fim = n - 1
+    idx = idx_fim
+
+    while idx - 1 >= 0:
+        if df_fechados.iloc[idx - 1]['high'] > df_fechados.iloc[idx]['high']:
+            idx -= 1
+        else:
+            break
+
+    idx_inicio_correcao = idx
+    idx_inicio_swing = max(0, idx_inicio_correcao - 1)
+
+    return idx_inicio_swing, idx_fim
+
+
+def obter_intervalo_estrutural_venda(df):
+    """
+    Para setups com escorregamento em VENDA:
+    volta desde o último candle fechado enquanto as mínimas seguem ascendentes.
+    Usa o candle anterior ao início da sequência como início do swing, se existir.
+    """
+    if df is None or df.empty:
+        return None, None
+
+    df_fechados = df.iloc[:-1].copy()
+    n = len(df_fechados)
+
+    if n < 3:
+        return None, None
+
+    idx_fim = n - 1
+    idx = idx_fim
+
+    while idx - 1 >= 0:
+        if df_fechados.iloc[idx - 1]['low'] < df_fechados.iloc[idx]['low']:
+            idx -= 1
+        else:
+            break
+
+    idx_inicio_correcao = idx
+    idx_inicio_swing = max(0, idx_inicio_correcao - 1)
+
+    return idx_inicio_swing, idx_fim
+
+
+def obter_intervalo_swing_por_setup(df, nome_setup, direcao):
+    """
+    Define o intervalo do swing conforme o setup e a direção.
+    """
+    nome_setup = str(nome_setup).strip().upper()
+    direcao = str(direcao).strip().upper()
+
+    # Setups sem escorregamento
+    if nome_setup == '9.1':
+        return obter_intervalo_fixo_swing(df, PERIODOS_SEQUENCIA_TENDENCIA)
+
+    if nome_setup == '9.4':
+        return obter_intervalo_fixo_swing(df, PERIODOS_TENDENCIA_SUAVE + 3)
+
+    # Setups com escorregamento
+    if nome_setup in ['9.2', '9.3', 'PC']:
+        if direcao == 'COMPRA':
+            return obter_intervalo_estrutural_compra(df)
+        elif direcao == 'VENDA':
+            return obter_intervalo_estrutural_venda(df)
+
+    return None, None
+
+
+def calcular_swing_absoluto_intervalo(df, idx_inicio, idx_fim, direcao):
+    """
+    Calcula swing absoluto dentro de um intervalo [idx_inicio, idx_fim]
+    usando apenas candles na direção.
+    """
+    if df is None or df.empty:
+        return None
+
+    df_fechados = df.iloc[:-1].copy()
+
+    if idx_inicio is None or idx_fim is None:
+        return None
+
+    if idx_inicio < 0 or idx_fim >= len(df_fechados) or idx_inicio > idx_fim:
+        return None
+
+    trecho = df_fechados.iloc[idx_inicio:idx_fim + 1].copy()
+    direcao = str(direcao).strip().upper()
+
+    if direcao == 'COMPRA':
+        trecho_dir = trecho[trecho['close'] > trecho['open']].copy()
+        if trecho_dir.empty:
+            return None
+
+        menor_open = trecho_dir['open'].min()
+        maior_close = trecho_dir['close'].max()
+
+        if pd.isna(menor_open) or pd.isna(maior_close):
+            return None
+
+        return round(maior_close - menor_open, 8)
+
+    elif direcao == 'VENDA':
+        trecho_dir = trecho[trecho['close'] < trecho['open']].copy()
+        if trecho_dir.empty:
+            return None
+
+        maior_open = trecho_dir['open'].max()
+        menor_close = trecho_dir['close'].min()
+
+        if pd.isna(maior_open) or pd.isna(menor_close):
+            return None
+
+        return round(maior_open - menor_close, 8)
+
+    return None
+
+
+def calcular_swing_percentual_intervalo(df, idx_inicio, idx_fim, direcao):
+    """
+    Calcula swing percentual dentro de um intervalo [idx_inicio, idx_fim]
+    usando apenas candles na direção.
+    """
+    if df is None or df.empty:
+        return None
+
+    df_fechados = df.iloc[:-1].copy()
+
+    if idx_inicio is None or idx_fim is None:
+        return None
+
+    if idx_inicio < 0 or idx_fim >= len(df_fechados) or idx_inicio > idx_fim:
+        return None
+
+    trecho = df_fechados.iloc[idx_inicio:idx_fim + 1].copy()
+    direcao = str(direcao).strip().upper()
+
+    if direcao == 'COMPRA':
+        trecho_dir = trecho[trecho['close'] > trecho['open']].copy()
+        if trecho_dir.empty:
+            return None
+
+        menor_open = trecho_dir['open'].min()
+        maior_close = trecho_dir['close'].max()
+
+        if pd.isna(menor_open) or pd.isna(maior_close) or menor_open == 0:
+            return None
+
+        swing_abs = maior_close - menor_open
+        return round((swing_abs / menor_open) * 100, 4)
+
+    elif direcao == 'VENDA':
+        trecho_dir = trecho[trecho['close'] < trecho['open']].copy()
+        if trecho_dir.empty:
+            return None
+
+        maior_open = trecho_dir['open'].max()
+        menor_close = trecho_dir['close'].min()
+
+        if pd.isna(maior_open) or pd.isna(menor_close) or maior_open == 0:
+            return None
+
+        swing_abs = maior_open - menor_close
+        return round((swing_abs / maior_open) * 100, 4)
+
+    return None
+
 def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.xlsx'):
     writer = pd.ExcelWriter(nome_arquivo, engine='xlsxwriter')
     workbook = writer.book
@@ -114,12 +359,15 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
     # === ABA 1: Tabela de resultados ===
     colunas_saida = [
         'Par', 'Timeframe', 'Mercado', 'Time Stamp', 'Setup', 'COMPRA/VENDA', 'ARMAR/DISPARAR',
-        'GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME', 'VOLUME_MMA21', 'CLOSE_ZERO', 'OPEN_ZERO'
+        'GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME', 'VOLUME_MMA21', 'CLOSE_ZERO', 'OPEN_ZERO',
+        'ATR_PERIOD','PARAM_ORIGEM','ATR_M1','K_SL','K_TP','SL','TP',
+        'SWING_ABS', 'SWING_PCT'
     ]
+
     tabela_saida = []
 
     for _, linha in ativos_df.iterrows():
-        resultado = linha['Último Setup Identificado']
+        resultado = str(linha.get('Último Setup Identificado', '')).strip()
         if resultado.startswith('ARMAR') or resultado.startswith('DISPARAR'):
             par = linha['Par']
             df = candles_dict.get(par)
@@ -139,7 +387,50 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
                 gatilho = float(resultado.split('gatilho: ')[1].split(' ')[0])
             except:
                 continue
-            
+
+#            lookback_swing = obter_lookback_swing_por_setup(setup)
+
+            # Parâmetros por par/timeframe (carrega ou otimiza on-demand? -> scan decide via flag)
+            # Aqui: usa apenas o cache/loader padrão (sem auto-optimize dentro da função)
+            tf_norm = normalize_timeframe(linha['Timeframe'])
+            params = carregar_params_otimizados(par, tf_norm, objective="mar")
+            if not params:
+                params = {"atr_period": ATR_PERIODO_SLTP, "k_sl": K_SL_PADRAO, "k_tp": K_TP_PADRAO, "origem": "padrao"}
+
+            atr_period = params['atr_period']; k_sl = params['k_sl']; k_tp = params['k_tp']; origem = params['origem']
+            logging.info(f"[EXCEL] {par} tf={tf_norm} | origem={origem} | atr_p={atr_period} | k_sl={k_sl} | k_tp={k_tp}")
+
+            atr_series = compute_atr(df, period=atr_period, method="wilder")
+            atr_m1 = float(atr_series.iloc[-2]) if len(atr_series) >= 2 else None
+
+            idx_inicio_swing, idx_fim_swing = obter_intervalo_swing_por_setup(
+                df,
+                nome_setup=setup,
+                direcao=direcao
+            )
+
+            swing_abs = calcular_swing_absoluto_intervalo(
+                df,
+                idx_inicio=idx_inicio_swing,
+                idx_fim=idx_fim_swing,
+                direcao=direcao
+            )
+
+            swing_pct = calcular_swing_percentual_intervalo(
+                df,
+                idx_inicio=idx_inicio_swing,
+                idx_fim=idx_fim_swing,
+                direcao=direcao
+            )            
+            SL = TP = None
+            if atr_m1 is not None:
+                if direcao.upper() == 'COMPRA':
+                    SL = float(gatilho) - k_sl * atr_m1
+                    TP = float(gatilho) + k_tp * atr_m1
+                elif direcao.upper() == 'VENDA':
+                    SL = float(gatilho) + k_sl * atr_m1
+                    TP = float(gatilho) - k_tp * atr_m1
+
             tabela_saida.append([
                 par,
                 linha['Timeframe'],
@@ -158,7 +449,8 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
                 float(candle_m1.get('volume', 0) or 0),
                 candle_m1.get('VOLUME_MMA21', None),
                 candle_zero['close'],
-                candle_zero['open']
+                candle_zero['open'],
+                atr_period, origem, atr_m1, k_sl, k_tp, SL, TP, swing_abs, swing_pct 
             ])
 
     df_saida = pd.DataFrame(tabela_saida, columns=colunas_saida)
@@ -173,10 +465,17 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
     formato_decimal = workbook.add_format({'num_format': '#,##0.00000000'})
     formato_volume = workbook.add_format({'num_format': '#,##0'})
 
-    colunas_float = ['GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME','VOLUME_MMA21', 'CLOSE_ZERO', 'OPEN_ZERO']
+    colunas_float = ['GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME','VOLUME_MMA21',
+                     'CLOSE_ZERO', 'OPEN_ZERO','ATR_M1','K_SL','K_TP','SL','TP',
+                     'SWING_ABS', 'SWING_PCT']
+    
     for col_nome in colunas_float:
         col_idx = df_saida.columns.get_loc(col_nome)
         worksheet_tabela.set_column(col_idx, col_idx, 18, formato_decimal)
+    # Ajuste largura também para 'ATR_PERIOD' e 'PARAM_ORIGEM' (texto): 
+    worksheet_tabela.set_column(df_saida.columns.get_loc('ATR_PERIOD'), df_saida.columns.get_loc('ATR_PERIOD'), 12)
+    worksheet_tabela.set_column(df_saida.columns.get_loc('PARAM_ORIGEM'), df_saida.columns.get_loc('PARAM_ORIGEM'), 12)
+
 
     # === ABA 2: Gráficos ===
     worksheet = workbook.add_worksheet('Graficos')
@@ -231,7 +530,7 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
             print(f"[❌] Erro ao gerar gráfico para {par}: {e}")
             continue
 
-    writer._save()
+    writer.close()
 #    print(f"✅ Arquivo gerado: {nome_arquivo}")
 
 # Função para buscar candles da Bybit
@@ -295,74 +594,273 @@ def dentro_do_horario():
 
     return False
 
-#Salvar no Google Drive a partir do Hostinger
+# Salvar no Google Drive a partir do Hostinger
 load_dotenv()
 
 def upload_file_to_drive(local_file_path, drive_folder_id):
     """
     Faz upload de um arquivo para o Google Drive, substituindo-o se já existir.
-    - local_file_path: caminho do arquivo local a enviar (ex: './ativos_opt_hr.xlsx')
-    - drive_folder_id: ID da pasta de destino no Google Drive (string).
+    As credenciais devem estar no .env:
+    GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REFRESH_TOKEN, GDRIVE_FOLDER_ID.
     """
-    # 1. Ler credenciais sensíveis das variáveis de ambiente
     client_id = os.environ.get("GDRIVE_CLIENT_ID")
     client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
     refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
+
+    if not drive_folder_id:
+        raise RuntimeError("GDRIVE_FOLDER_ID não encontrado nas variáveis de ambiente.")
+
     if not client_id or not client_secret or not refresh_token:
         raise RuntimeError("Credenciais do Google Drive não encontradas nas variáveis de ambiente.")
 
-    # 2. Configurar autenticação GoogleAuth com OAuth2 (modo headless usando refresh token)
     gauth = GoogleAuth()
-    # Definir as configurações do cliente OAuth diretamente (sem arquivo client_secrets.json)
     gauth.settings["client_config_backend"] = "settings"
     gauth.settings["client_config"] = {
         "client_id": client_id,
         "client_secret": client_secret,
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://accounts.google.com/o/oauth2/token",
-        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob"  # URI de redirecionamento padrão para apps instalados
+        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob"
     }
-    # Criar credencial OAuth2 usando o refresh token (access_token será obtido automaticamente)
+
     credentials = OAuth2Credentials(
-        None,            # access_token inicial (None para forçar refresh imediato)
+        None,
         client_id,
         client_secret,
         refresh_token,
-        None,            # data de expiração (None porque vamos sempre atualizar)
+        None,
         "https://accounts.google.com/o/oauth2/token",
-        None            # user_agent (opcional)
+        None
     )
-    gauth.credentials = credentials  # Atribuir as credenciais ao objeto GoogleAuth
+    gauth.credentials = credentials
 
-    # Garantir que estamos autenticados (refresh o token de acesso se necessário)
     if gauth.access_token_expired:
-        gauth.Refresh()      # Usa o refresh token para obter um novo access token
+        gauth.Refresh()
     else:
-        gauth.Authorize()    # Credencial já válida (não expirada)
+        gauth.Authorize()
 
-    # Criar a instância do GoogleDrive autenticada
     drive = GoogleDrive(gauth)
-
-    # 3. Verificar se o arquivo já existe na pasta de destino
     file_name = os.path.basename(local_file_path)
     query = f"title='{file_name}' and '{drive_folder_id}' in parents and trashed=false"
     file_list = drive.ListFile({'q': query}).GetList()
-    # O query acima busca por arquivos com título igual ao nome do arquivo e na pasta especificada (não removidos)
 
     if file_list:
-        # Arquivo já existe – pegar o primeiro resultado (assumindo nome único)
         existing_file = file_list[0]
-        print(f"Arquivo encontrado no Drive (ID={existing_file['id']}), atualizando conteúdo...")
-        existing_file.SetContentFile(local_file_path)  # Define o conteúdo para o arquivo local
-        existing_file.Upload()  # Faz upload sobrescrevendo o conteúdo do arquivo existente:contentReference[oaicite:6]{index=6}
-        print(f"Arquivo '{file_name}' atualizado com sucesso no Google Drive.")
+        logging.info(f"Arquivo encontrado no Drive (ID={existing_file['id']}), atualizando conteúdo...")
+        existing_file.SetContentFile(local_file_path)
+        existing_file.Upload()
+        logging.info(f"Arquivo '{file_name}' atualizado com sucesso no Google Drive.")
     else:
-        # Arquivo não existe – criar um novo na pasta alvo
-        print(f"Arquivo não encontrado no Drive, fazendo upload como novo arquivo.")
+        logging.info("Arquivo não encontrado no Drive, fazendo upload como novo arquivo.")
         new_file = drive.CreateFile({'title': file_name, 'parents': [{'id': drive_folder_id}]})
-        new_file.SetContentFile(local_file_path)  # Anexa o conteúdo do arquivo local
-        new_file.Upload()  # Envia o arquivo (novo upload) para o Drive:contentReference[oaicite:7]{index=7}
-        print(f"Arquivo '{file_name}' enviado com sucesso para a pasta do Drive.")
+        new_file.SetContentFile(local_file_path)
+        new_file.Upload()
+        logging.info(f"Arquivo '{file_name}' enviado com sucesso para a pasta do Drive.")
+
+# Função para gerar valores de SL E TP
+def caminho_json(par, timeframe, objective="mar") -> Path:
+    tf = normalize_timeframe(timeframe)
+    fname = f"opt_{par}_{tf}m_{objective}.json"
+    return DIRETORIO_OPT / fname
+
+def json_otimizacao_ainda_valido(par, timeframe, objective="mar", dias_validade=7):
+    path = caminho_json(par, timeframe, objective)
+    if not path.exists():
+        return False
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        generated_at = data.get("generated_at")
+        if not generated_at:
+            return False
+
+        dt_gen = datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+        idade = datetime.now() - dt_gen
+
+        return idade <= timedelta(days=dias_validade)
+
+    except Exception as e:
+        logging.warning(f"[OPT] Não foi possível validar idade do JSON {path}: {e}")
+        return False
+    
+def carregar_params_otimizados(par, timeframe, objective="mar"):
+    """
+    Lê opt_{par}_{tf}m_{objective}.json e extrai atr_period, k_sl e k_tp
+    aceitando variações de chaves tanto em best_params quanto na raiz.
+    """
+    path = caminho_json(par, timeframe, objective)
+    if not path.exists():
+        return None
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logging.warning(f"[OPT] Falha ao ler {path}: {e}")
+        return None
+
+    # Onde procurar: best_params primeiro, depois raiz
+    candidates = []
+    if isinstance(data, dict):
+        if isinstance(data.get("best_params"), dict):
+            candidates.append(data["best_params"])
+        candidates.append(data)
+
+    def pick_float(d, keys, default=None):
+        for k in keys:
+            if k in d and d[k] is not None:
+                try:
+                    return float(d[k])
+                except Exception:
+                    pass
+        return default
+
+    def pick_int(d, keys, default=None):
+        for k in keys:
+            if k in d and d[k] is not None:
+                try:
+                    return int(float(d[k]))
+                except Exception:
+                    pass
+        return default
+
+    atr_period = k_sl = k_tp = None
+
+    # aliases aceitos
+    ATR_KEYS = ["atr_period", "ATR_PERIOD", "atr", "atr_p", "atr_len"]
+    KSL_KEYS = ["k_sl", "K_SL", "ksl", "sl_mult", "sl", "k_stop", "k_sl_mult"]
+    KTP_KEYS = ["k_tp", "K_TP", "ktp", "tp_mult", "tp", "k_take", "k_tp_mult"]
+
+    for d in candidates:
+        if atr_period is None:
+            atr_period = pick_int(d, ATR_KEYS)
+        if k_sl is None:
+            k_sl = pick_float(d, KSL_KEYS)
+        if k_tp is None:
+            k_tp = pick_float(d, KTP_KEYS)
+
+    if atr_period is None: atr_period = ATR_PERIODO_SLTP
+    if k_sl is None:       k_sl       = K_SL_PADRAO
+    if k_tp is None:       k_tp       = K_TP_PADRAO
+
+    logging.info(f"[OPT] Carregado de {path.name} | atr={atr_period} k_sl={k_sl} k_tp={k_tp}")
+    return {"atr_period": atr_period, "k_sl": k_sl, "k_tp": k_tp, "origem": "otimizado"}
+
+def salvar_params_otimizados(par, timeframe, objective, best_params, best_score):
+    """Salva JSON em DIRETORIO_OPT com nome normalizado."""
+    path = caminho_json(par, timeframe, objective)
+    payload = {
+        "symbol": par,
+        "interval": normalize_timeframe(timeframe),
+        "objective": objective,
+        "best_params": best_params,
+        "best_score": best_score,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    logging.info(f"[OPT] ✅ Salvo: {path}")
+
+def garantir_params(par, timeframe, df_hist=None, objective="mar",
+                    auto_optimize=False, use_optuna=False, limit=1000):
+    """
+    Regras:
+    1) Se existir JSON válido (recente), usa.
+    2) Se não existir JSON, ou estiver vencido, e auto_optimize=True, reotimiza.
+    3) Se existir JSON vencido e auto_optimize=False, usa mesmo assim.
+    4) Se não existir nada, usa padrão.
+    """
+    params = carregar_params_otimizados(par, timeframe, objective=objective)
+
+    json_valido = json_otimizacao_ainda_valido(
+        par, timeframe,
+        objective=objective,
+        dias_validade=REOTIMIZAR_APOS_DIAS
+    )
+
+    # Caso 1: JSON existe e está válido
+    if params and json_valido:
+        logging.info(f"[OPT] JSON válido encontrado para {par} {timeframe}m -> usando parâmetros otimizados")
+        return params
+
+    # Caso 2: JSON não existe ou venceu, e auto_optimize está ativo
+    if auto_optimize:
+        try:
+            from optimizer_atr_sl_tp import run_optimization_with_setups
+
+            if df_hist is None:
+                df_hist = obter_candles(par=par, interval=str(timeframe), limit=limit, mercado="linear")
+                if df_hist is None or df_hist.empty:
+                    raise RuntimeError("Sem dados para otimização.")
+                if "timestamp" in df_hist.columns:
+                    df_hist = df_hist.set_index("timestamp")
+
+            SETUPS = [setup_9_1, setup_9_2, setup_9_3, setup_9_4, setup_pc]
+
+            logging.info(f"[OPT] Reotimizando {par} {timeframe}m...")
+            best_params, best_score = run_optimization_with_setups(
+                df_hist,
+                setup_funcs=SETUPS,
+                objective=objective,
+                use_optuna=use_optuna
+            )
+
+            salvar_params_otimizados(par, timeframe, objective, best_params, best_score)
+
+            return {
+                "atr_period": int(best_params.get("atr_period", ATR_PERIODO_SLTP)),
+                "k_sl": float(best_params.get("k_sl", K_SL_PADRAO)),
+                "k_tp": float(best_params.get("k_tp", K_TP_PADRAO)),
+                "origem": "otimizado"
+            }
+
+        except Exception as e:
+            logging.warning(f"[OPT] Auto-optimize falhou p/ {par} {timeframe}m: {e}")
+
+    # Caso 3: JSON existe, mas está vencido, e não foi pedido auto-optimize
+    if params:
+        logging.info(f"[OPT] JSON vencido para {par} {timeframe}m -> usando mesmo assim")
+        return params
+
+    # Caso 4: fallback padrão
+    logging.info(f"[OPT] Sem JSON para {par} {timeframe}m -> usando parâmetros padrão")
+    return {
+        "atr_period": ATR_PERIODO_SLTP,
+        "k_sl": K_SL_PADRAO,
+        "k_tp": K_TP_PADRAO,
+        "origem": "padrao"
+    }
+# Lê todos os pares/timeframes da ativos.xlsx, baixa dados e gera/atualiza os JSONs opt_*.json.
+def cli_optimize_from_excel(objective="mar", use_optuna=False, limit=1000, mercado_default="linear"):
+    try:
+        ativos_df = pd.read_excel(ARQUIVO_EXCEL)
+    except Exception as e:
+        logging.error(f"Erro ao carregar o arquivo Excel: {e}")
+        return 1
+
+    pares = ativos_df[['Par','Timeframe']].dropna().drop_duplicates()
+    from optimizer_atr_sl_tp import run_optimization_with_setups
+    SETUPS = [setup_9_1, setup_9_2, setup_9_3, setup_9_4, setup_pc]
+
+    for _, row in pares.iterrows():
+        par = row['Par']; timeframe = row['Timeframe']; tf_norm = normalize_timeframe(timeframe)
+        df_hist = obter_candles(par=par, interval=tf_norm, limit=limit, mercado=mercado_default)
+        if df_hist is None or df_hist.empty:
+            logging.warning(f"[OPT-ALL] Sem dados para {par} {tf_norm}m")
+            continue
+        if "timestamp" in df_hist.columns:
+            df_hist = df_hist.set_index("timestamp")
+
+        best_params, best_score = run_optimization_with_setups(
+            df_hist, setup_funcs=SETUPS, objective=objective, use_optuna=use_optuna
+        )
+
+        salvar_params_otimizados(par, timeframe, objective, best_params, best_score)
+        logging.info(f"[OPT-ALL] ✅ {par} {tf_norm}m salvo em {caminho_json(par, timeframe, objective)}")
+
+    return 0
 
 # === Setups de Larry Williams ===
 # === SETUP 9.1 ===
@@ -483,7 +981,7 @@ def setup_9_2(df, ativo=""):
                 'coluna': 'high',
                 'debug_origem': 'COMPRA-ARMAR'
             }
-    
+
         logging.debug("." * 92)
         logging.debug(f"    Iniciando avaliação de escorregamento")
         candle_m1 = df.iloc[-1]
@@ -1022,8 +1520,43 @@ def setup_pc(df, ativo=""):
 
     return None
 
+#Incluindo para cálculo de SL e TP otimizados
+SETUPS = [setup_9_1, setup_9_2, setup_9_3, setup_9_4, setup_pc]
+
 # === EXECUÇÃO PRINCIPAL ===
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Bybit Setups — Scan & Optimization")
+    sub = parser.add_subparsers(dest="mode", required=False)
+
+    # (1) SCAN (gera ativos_opt.xlsx com SL/TP + ATR_PERIOD + PARAM_ORIGEM)
+    scan_p = sub.add_parser("scan", help="Rodar scanner e exportar planilha")
+    scan_p.add_argument("--auto-optimize", action="store_true",
+                        help="Se faltar param otimizado, roda otimização on-the-fly para aquele par/timeframe")
+    scan_p.add_argument("--objective", choices=["net","mar","sharpe","pf"], default="mar")
+    scan_p.add_argument("--optuna", action="store_true")
+    scan_p.add_argument("--limit", type=int, default=1000)
+
+    # (2) OPTIMIZE-FROM-EXCEL (gera JSONs para todos os pares/timeframes da planilha)
+    optall_p = sub.add_parser("optimize-from-excel", help="Otimiza todos os pares/timeframes listados em ativos.xlsx")
+    optall_p.add_argument("--objective", choices=["net","mar","sharpe","pf"], default="mar")
+    optall_p.add_argument("--optuna", action="store_true")
+    optall_p.add_argument("--limit", type=int, default=1000)
+    optall_p.add_argument("--mercado", default="linear")
+
+    args = parser.parse_args()
+
+    if args.mode == "optimize-from-excel":
+        code = cli_optimize_from_excel(objective=args.objective, use_optuna=args.optuna,
+                                       limit=args.limit, mercado_default=args.mercado)
+        raise SystemExit(code)
+
+    # ===== Normaliza args para o modo padrão (sem subcomando / scan implícito) =====
+    objective     = getattr(args, "objective", "mar")
+    auto_optimize = getattr(args, "auto_optimize", False)
+    optuna_flag   = getattr(args, "optuna", False)
+    limit         = getattr(args, "limit", 1000)
+
+    # ====== MODO PADRÃO: SCAN (se args.mode for None ou 'scan') ======
     if not dentro_do_horario():
         logging.info("Fora do horário configurado. Encerrando execução.")
         exit()
@@ -1045,8 +1578,8 @@ if __name__ == "__main__":
 
     for idx, ativo in ativos_df.iterrows():
         par = ativo['Par']
-        timeframe = str(ativo['Timeframe'])
-        mercado = ativo.get('Mercado', 'linear')
+        timeframe = normalize_timeframe(ativo['Timeframe'])
+        mercado = str(ativo.get('Mercado', 'linear')).lower()
 
         try:
             df = obter_candles(par=par, interval=timeframe, mercado=mercado)
@@ -1063,6 +1596,24 @@ if __name__ == "__main__":
             logging.error(f"Erro ao obter dados de {par}: {e}")
             ativos_df.at[idx, 'Último Setup Identificado'] = f"Erro: {e}"
             continue
+
+        # AQUI: garante params (se você quiser usar no Excel depois)
+        params = garantir_params(
+            par,
+            timeframe,
+            df_hist=df.set_index('timestamp') if 'timestamp' in df.columns else None,
+            objective=objective,           # <<< usa variável normalizada
+            auto_optimize=auto_optimize,   # <<< idem
+            use_optuna=optuna_flag,        # <<< idem
+            limit=limit                    # <<< idem
+        )
+
+        # Você pode guardar params por par para uso posterior dentro de gerar_excel_com_graficos
+        ativos_df.at[idx, '_ATR_PERIOD'] = params['atr_period']
+        ativos_df.at[idx, '_K_SL'] = params['k_sl']
+        ativos_df.at[idx, '_K_TP'] = params['k_tp']
+        ativos_df.at[idx, '_PARAM_ORIGEM'] = params['origem']
+
 
         if df.empty or len(df) < PERIODOS_MINIMO:
             logging.warning(f"Poucos dados para {par} ({timeframe}min)")
@@ -1107,6 +1658,8 @@ if __name__ == "__main__":
 
         resultado_final = None
         status_do_setup = "Nenhum"
+        swing_abs_setup = None
+        swing_pct_setup = None
 
         for func in [setup_9_1, setup_9_2, setup_9_3, setup_9_4, setup_pc]:
             resultado = func(df, ativo=par)
@@ -1138,6 +1691,29 @@ if __name__ == "__main__":
                 high_m1 = candle_m1['high']
                 low_m1 = candle_m1['low']
 
+                partes_status = resultado['status'].split()
+                nome_setup = partes_status[2] if len(partes_status) >= 3 else ''
+                direcao_swing = partes_status[1].upper() if len(partes_status) >= 2 else ''
+
+                idx_inicio_swing, idx_fim_swing = obter_intervalo_swing_por_setup(
+                    df,
+                    nome_setup=nome_setup,
+                    direcao=direcao_swing
+                )
+
+                swing_abs_setup = calcular_swing_absoluto_intervalo(
+                    df,
+                    idx_inicio=idx_inicio_swing,
+                    idx_fim=idx_fim_swing,
+                    direcao=direcao_swing
+                )
+
+                swing_pct_setup = calcular_swing_percentual_intervalo(
+                    df,
+                    idx_inicio=idx_inicio_swing,
+                    idx_fim=idx_fim_swing,
+                    direcao=direcao_swing
+                )
                 resultado_final = (
                     f"{resultado['status']} (gatilho: {gatilho_formatado} | "
                     f"h: {high_m1:.7f} | l: {low_m1:.7f}) "
@@ -1147,6 +1723,9 @@ if __name__ == "__main__":
                 break  # <- Apenas o primeiro setup encontrado será reportado
 
         # Atualiza a última linha do CSV com o nome do setup
+        ativos_df.at[idx, 'SWING_ABS'] = swing_abs_setup
+        ativos_df.at[idx, 'SWING_PCT'] = swing_pct_setup
+
         if len(dados_integridade) >= 6:
             dados_integridade[-6:][-1]['Setup Identificado'] = status_do_setup
 
@@ -1159,14 +1738,12 @@ if __name__ == "__main__":
         # Envio de alerta apenas para ARMAR ou DISPARAR
         if status_do_setup.startswith("ARMAR") or status_do_setup.startswith("DISPARAR"):
             mensagem = f"🚨 {par} | {resultado_final}"
-            enviar_alerta_telegram(mensagem) # Cancelar para evitar muita informação no debgu
+            enviar_alerta_telegram(mensagem)
         logging.debug("=" * 92)
 
     # === SALVAMENTO E ENCERRAMENTO FINAL ===
     # Salva a planilha Excel original
-
     ARQUIVO_EXCEL_OPT = "ativos_opt_hr.xlsx"
-
     try:
         gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo=ARQUIVO_EXCEL_OPT)
         logging.info(f"✅ Arquivo '{ARQUIVO_EXCEL_OPT}' salvo com sucesso com dados e gráficos.")
@@ -1177,13 +1754,16 @@ if __name__ == "__main__":
     try:
         df_csv = pd.DataFrame(dados_integridade)
         df_csv.to_csv("dados_candles.csv", index=False)
-        logging.info("📁 Arquivo 'dados_candles.csv' salvo com os candles mais recentes.")
+
+        logging.debug("📁 Arquivo 'dados_candles.csv' salvo com os candles mais recentes.")
     except Exception as e:
         logging.error(f"❌ Erro ao salvar CSV: {e}")
 
-    #Chamada da função para envio ao Google Drive no Hostinger
-    upload_file_to_drive('ativos_opt_hr.xlsx', os.environ.get("GDRIVE_FOLDER_ID")) #Grava sempre o mesmo arquivo ativos_opt_hr.xlsx
+    # Chamada da função para envio ao Google Drive no Hostinger
+    try:
+        upload_file_to_drive(ARQUIVO_EXCEL_OPT, os.environ.get("GDRIVE_FOLDER_ID"))
+    except Exception as e:
+        logging.error(f"❌ Erro ao enviar '{ARQUIVO_EXCEL_OPT}' para o Google Drive: {e}")
 
     logging.debug("-" * 60)
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-
