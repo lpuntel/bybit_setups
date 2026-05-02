@@ -67,6 +67,7 @@ PERIODOS_MINIMO = 30 #Número mínimo de períodos para considerar análise do a
 CASAS_DECIMAIS_GATILHO = 7  # Número de casas decimais para exibir os gatilhos
 ENVIAR_ALERTA_TELEGRAM = True  # Enviar alertas automáticos via Telegram
 DEBUG_MODE = False  # Para exibir mensagens detalhadas no futuro (opcional)
+GERAR_GRAFICOS = False   # True = gera gráficos | False = desativa gráficos
 
 # Parâmetros de Horário de Execução
 USAR_HORARIO_LOCAL = True
@@ -478,6 +479,10 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
 
 
     # === ABA 2: Gráficos ===
+    if not GERAR_GRAFICOS:
+        writer.close()
+        return
+    
     worksheet = workbook.add_worksheet('Graficos')
     writer.sheets['Graficos'] = worksheet
 
