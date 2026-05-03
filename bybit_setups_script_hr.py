@@ -1576,6 +1576,14 @@ if __name__ == "__main__":
     ativos_df = ativos_df.loc[:, ~ativos_df.columns.duplicated(keep='first')]
 
     logging.info(f"Execução iniciada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
+#### >>Medição de Tempo do Script
+    import time
+    tempo_inicio_total = time.time()
+    tempo_download = 0
+    tempo_setups = 0
+#### <<Medição de Tempo do Script
+
     logging.debug('*' * 92)
 
     # Criando dicionário candles_dict
@@ -1587,7 +1595,14 @@ if __name__ == "__main__":
         mercado = str(ativo.get('Mercado', 'linear')).lower()
 
         try:
+#### >>Medição de Tempo do Script
+            t0 = time.time()
+#### <<Medição de Tempo do Script
             df = obter_candles(par=par, interval=timeframe, mercado=mercado)
+#### >>Medição de Tempo do Script
+            tempo_download += time.time() - t0
+#### <<Medição de Tempo do Script
+            
             candles_dict[par] = df.copy()
 
             # Calcula médias móveis com candle [0]
@@ -1666,6 +1681,9 @@ if __name__ == "__main__":
         swing_abs_setup = None
         swing_pct_setup = None
 
+#### >>Medição de Tempo do Script
+        t1 = time.time()
+#### >>Medição de Tempo do Script
         for func in [setup_9_1, setup_9_2, setup_9_3, setup_9_4, setup_pc]:
             resultado = func(df, ativo=par)
             logging.debug(f"  ▶️Resultado de {func.__name__}: {resultado}")
@@ -1726,6 +1744,9 @@ if __name__ == "__main__":
                 )
                 status_do_setup = resultado['status']
                 break  # <- Apenas o primeiro setup encontrado será reportado
+#### >>Medição de Tempo do Script
+        tempo_setups += time.time() - t1
+#### <<Medição de Tempo do Script
 
         # Atualiza a última linha do CSV com o nome do setup
         ativos_df.at[idx, 'SWING_ABS'] = swing_abs_setup
@@ -1771,4 +1792,12 @@ if __name__ == "__main__":
         logging.error(f"❌ Erro ao enviar '{ARQUIVO_EXCEL_OPT}' para o Google Drive: {e}")
 
     logging.debug("-" * 60)
+
+#### >>Medição de Tempo do Script
+    tempo_total = time.time() - tempo_inicio_total
+    logging.info(f"⏱ Tempo total: {tempo_total/60:.2f} minutos")
+    logging.info(f"📥 Tempo download: {tempo_download/60:.2f} minutos")
+    logging.info(f"🧠 Tempo setups: {tempo_setups/60:.2f} minutos")
+#### <<Medição de Tempo do Script
+
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
