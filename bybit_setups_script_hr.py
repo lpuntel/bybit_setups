@@ -1582,6 +1582,7 @@ if __name__ == "__main__":
     tempo_inicio_total = time.time()
     tempo_download = 0
     tempo_setups = 0
+    tempo_excel = 0
 #### <<Medição de Tempo do Script
 
     logging.debug('*' * 92)
@@ -1807,6 +1808,7 @@ if __name__ == "__main__":
     logging.info(f"⏱ Tempo total: {tempo_total/60:.2f} minutos")
     logging.info(f"📥 Tempo download: {tempo_download/60:.2f} minutos")
     logging.info(f"🧠 Tempo setups: {tempo_setups/60:.2f} minutos")
+    logging.info(f"📊 Tempo Excel: {tempo_excel/60:.2f} minutos")
 #### <<Medição de Tempo do Script
 
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
