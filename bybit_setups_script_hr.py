@@ -1587,6 +1587,9 @@ if __name__ == "__main__":
     tempo_download = 0
     tempo_setups = 0
     tempo_excel = 0
+    tempo_params = 0
+    tempo_upload = 0
+    tempo_loop_total = 0
 #### <<Medição de Tempo do Script
 
     logging.debug('*' * 92)
@@ -1595,6 +1598,11 @@ if __name__ == "__main__":
     candles_dict = {}
 
     for idx, ativo in ativos_df.iterrows():
+
+#### >>Medição de Tempo do Script
+        t_loop = time.time()
+#### <<Medição de Tempo do Script
+
         par = ativo['Par']
         timeframe = normalize_timeframe(ativo['Timeframe'])
         mercado = str(ativo.get('Mercado', 'linear')).lower()
@@ -1623,6 +1631,10 @@ if __name__ == "__main__":
             continue
 
         # AQUI: garante params (se você quiser usar no Excel depois)
+#### >>Medição de Tempo do Script
+        t_params = time.time()
+#### >>Medição de Tempo do Script
+
         params = garantir_params(
             par,
             timeframe,
@@ -1632,6 +1644,10 @@ if __name__ == "__main__":
             use_optuna=optuna_flag,        # <<< idem
             limit=limit                    # <<< idem
         )
+
+#### >>Medição de Tempo do Script
+        tempo_params += time.time() - t_params
+#### >>Medição de Tempo do Script
 
         # Você pode guardar params por par para uso posterior dentro de gerar_excel_com_graficos
         ativos_df.at[idx, '_ATR_PERIOD'] = params['atr_period']
@@ -1771,6 +1787,9 @@ if __name__ == "__main__":
             mensagem = f"🚨 {par} | {resultado_final}"
             enviar_alerta_telegram(mensagem)
         logging.debug("=" * 92)
+#### >>Medição de Tempo do Script
+        tempo_loop_total += time.time() - t_loop
+#### <<Medição de Tempo do Script
 
     # === SALVAMENTO E ENCERRAMENTO FINAL ===
     # Salva a planilha Excel original
@@ -1801,7 +1820,17 @@ if __name__ == "__main__":
 
     # Chamada da função para envio ao Google Drive no Hostinger
     try:
+
+#### >>Medição de Tempo do Script
+        t_upload = time.time()
+#### <<Medição de Tempo do Script
+
         upload_file_to_drive(ARQUIVO_EXCEL_OPT, os.environ.get("GDRIVE_FOLDER_ID"))
+
+#### >>Medição de Tempo do Script
+        tempo_upload = time.time() - t_upload
+#### <<Medição de Tempo do Script
+
     except Exception as e:
         logging.error(f"❌ Erro ao enviar '{ARQUIVO_EXCEL_OPT}' para o Google Drive: {e}")
 
@@ -1813,6 +1842,9 @@ if __name__ == "__main__":
     logging.info(f"📥 Tempo download: {tempo_download/60:.2f} minutos")
     logging.info(f"🧠 Tempo setups: {tempo_setups/60:.2f} minutos")
     logging.info(f"📊 Tempo Excel: {tempo_excel/60:.2f} minutos")
+    logging.info(f"⚙️ Tempo params/JSON: {tempo_params/60:.2f} minutos")
+    logging.info(f"☁️ Tempo upload Drive: {tempo_upload/60:.2f} minutos")
+    logging.info(f"🔁 Tempo loop total ativos: {tempo_loop_total/60:.2f} minutos")
 #### <<Medição de Tempo do Script
 
     logging.info(f"🏁 Execução finalizada em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
