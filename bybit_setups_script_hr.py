@@ -568,7 +568,7 @@ def enviar_alerta_telegram(mensagem):
     payload = {'chat_id': chat_id, 'text': mensagem}
     try:
         if ENVIAR_ALERTA_TELEGRAM:
-            requests.post(url, data=payload)
+            requests.post(url, data=payload, timeout=5)
     except Exception as e:
         print(f"Erro ao enviar alerta Telegram: {e}")
 
@@ -1569,7 +1569,7 @@ if __name__ == "__main__":
     try:
         ativos_df = pd.read_excel(ARQUIVO_EXCEL)
 #### >>Reduzir o ativos_df a uma amostra para fim de testes
-        ativos_df = ativos_df.head(30)
+#        ativos_df = ativos_df.head(30)
 #### <<Reduzir o ativos_df a uma amostra para fim de testes
 
     except Exception as e:
