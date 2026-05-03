@@ -1568,6 +1568,10 @@ if __name__ == "__main__":
 
     try:
         ativos_df = pd.read_excel(ARQUIVO_EXCEL)
+#### >>Reduzir o ativos_df a uma amostra para fim de testes
+        ativos_df = ativos_df.head(30)
+#### <<Reduzir o ativos_df a uma amostra para fim de testes
+
     except Exception as e:
         logging.error(f"Erro ao carregar o arquivo Excel: {e}")
         exit()
