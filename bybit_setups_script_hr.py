@@ -65,7 +65,7 @@ PERIODOS_TENDENCIA_SUAVE = 6  # Número de candles consecutivos para confirmar s
 PASSO_TENDENCIA_SUAVE = 2  # Intervalo usado para suavizar a comparação entre médias (ex: compara -9 com -11)
 PERIODOS_MINIMO = 30 #Número mínimo de períodos para considerar análise do ativo 
 CASAS_DECIMAIS_GATILHO = 7  # Número de casas decimais para exibir os gatilhos
-ENVIAR_ALERTA_TELEGRAM = True  # Enviar alertas automáticos via Telegram
+ENVIAR_ALERTA_TELEGRAM = False  # Enviar alertas automáticos via Telegram
 DEBUG_MODE = False  # Para exibir mensagens detalhadas no futuro (opcional)
 GERAR_GRAFICOS = False   # True = gera gráficos | False = desativa gráficos
 
