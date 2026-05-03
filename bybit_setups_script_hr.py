@@ -1771,7 +1771,16 @@ if __name__ == "__main__":
     # Salva a planilha Excel original
     ARQUIVO_EXCEL_OPT = "ativos_opt_hr.xlsx"
     try:
+#### >>Medição de Tempo do Script
+        t_excel = time.time()
+#### <<Medição de Tempo do Script
+
         gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo=ARQUIVO_EXCEL_OPT)
+
+#### >>Medição de Tempo do Script
+        tempo_excel = time.time() - t_excel
+#### <<Medição de Tempo do Script
+
         logging.info(f"✅ Arquivo '{ARQUIVO_EXCEL_OPT}' salvo com sucesso com dados e gráficos.")
     except Exception as e:
         logging.error(f"❌ Erro ao gerar o arquivo '{ARQUIVO_EXCEL_OPT}': {e}")
