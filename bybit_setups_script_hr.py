@@ -61,7 +61,8 @@ matplotlib.set_loglevel('warning')  # Apenas se sua versão do matplotlib suport
 PERIODOS_TENDENCIA = 10  # Número de candles para confirmar tendência predominante (usado no 9.1)
 PERIODOS_SEQUENCIA_TENDENCIA = 10  # Número de candles para confirmar tendência predominante (usado no 9.1)
 PERIODOS_TENDENCIA_SUAVE = 6  # Número de candles consecutivos para confirmar sequência de tendência (9.2, 9.3, 9.4, PC)
-
+LOOKBACK_PAVIO_CORPO = 10 #Número de candles para calcular a relação Pavio/Corpo
+SLOPE_MME9_PERIODOS = 5
 PASSO_TENDENCIA_SUAVE = 2  # Intervalo usado para suavizar a comparação entre médias (ex: compara -9 com -11)
 PERIODOS_MINIMO = 30 #Número mínimo de períodos para considerar análise do ativo 
 CASAS_DECIMAIS_GATILHO = 7  # Número de casas decimais para exibir os gatilhos
@@ -153,6 +154,62 @@ def compute_atr(df, period=14, method="wilder"):
     else:
         atr = tr.rolling(period, min_periods=1).mean()
     return atr
+
+def calcular_slope_mme9(df, periodos=SLOPE_MME9_PERIODOS):
+    """
+    Calcula a inclinação percentual da MME9 nos últimos `periodos` candles fechados.
+    Remove o candle [0] em formação.
+    """
+    if df is None or df.empty:
+        return None
+
+    df_fechados = df.iloc[:-1].copy()
+
+    if 'MME9' not in df_fechados.columns:
+        df_fechados['MME9'] = df_fechados['close'].ewm(span=9).mean()
+
+    if len(df_fechados) < periodos + 1:
+        return None
+
+    mme_inicio = df_fechados['MME9'].iloc[-periodos]
+    mme_fim = df_fechados['MME9'].iloc[-1]
+
+    if mme_inicio == 0 or pd.isna(mme_inicio) or pd.isna(mme_fim):
+        return None
+
+    return round(((mme_fim - mme_inicio) / mme_inicio) * 100, 4)
+
+def calcular_razao_pavio_corpo(df, lookback=LOOKBACK_PAVIO_CORPO):
+    """
+    Calcula a razão média pavio/corpo dos últimos `lookback` candles fechados.
+    
+    corpo = abs(close - open)
+    pavio_total = (high - low) - corpo
+    razão = média(pavio_total / corpo)
+    """
+    if df is None or df.empty:
+        return None
+
+    df_fechados = df.iloc[:-1].copy()
+
+    if len(df_fechados) < lookback:
+        return None
+
+    trecho = df_fechados.iloc[-lookback:].copy()
+
+    corpo = (trecho['close'] - trecho['open']).abs()
+    range_total = trecho['high'] - trecho['low']
+    pavio_total = range_total - corpo
+
+    corpo = corpo.replace(0, pd.NA)
+
+    razao = pavio_total / corpo
+    razao = razao.dropna()
+
+    if razao.empty:
+        return None
+
+    return round(razao.mean(), 4)
 
 def obter_intervalo_fixo_swing(df, lookback):
     """
@@ -362,7 +419,7 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
         'Par', 'Timeframe', 'Mercado', 'Time Stamp', 'Setup', 'COMPRA/VENDA', 'ARMAR/DISPARAR',
         'GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME', 'VOLUME_MMA21', 'CLOSE_ZERO', 'OPEN_ZERO',
         'ATR_PERIOD','PARAM_ORIGEM','ATR_M1','K_SL','K_TP','SL','TP',
-        'SWING_ABS', 'SWING_PCT'
+        'SWING_ABS', 'SWING_PCT', 'SLOPE_MME9_PCT', 'RAZAO_PAVIO_CORPO'
     ]
 
     tabela_saida = []
@@ -423,6 +480,9 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
                 idx_fim=idx_fim_swing,
                 direcao=direcao
             )            
+            slope_mme9_pct = calcular_slope_mme9(df, periodos=SLOPE_MME9_PERIODOS)
+            razao_pavio_corpo = calcular_razao_pavio_corpo(df, lookback=LOOKBACK_PAVIO_CORPO)            
+
             SL = TP = None
             if atr_m1 is not None:
                 if direcao.upper() == 'COMPRA':
@@ -451,7 +511,8 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
                 candle_m1.get('VOLUME_MMA21', None),
                 candle_zero['close'],
                 candle_zero['open'],
-                atr_period, origem, atr_m1, k_sl, k_tp, SL, TP, swing_abs, swing_pct 
+                atr_period, origem, atr_m1, k_sl, k_tp, SL, TP,
+                swing_abs, swing_pct, slope_mme9_pct, razao_pavio_corpo
             ])
 
     df_saida = pd.DataFrame(tabela_saida, columns=colunas_saida)
@@ -468,7 +529,7 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
 
     colunas_float = ['GATILHO', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'MME9', 'MMA21', 'VOLUME','VOLUME_MMA21',
                      'CLOSE_ZERO', 'OPEN_ZERO','ATR_M1','K_SL','K_TP','SL','TP',
-                     'SWING_ABS', 'SWING_PCT']
+                     'SWING_ABS', 'SWING_PCT','SLOPE_MME9_PCT', 'RAZAO_PAVIO_CORPO']
     
     for col_nome in colunas_float:
         col_idx = df_saida.columns.get_loc(col_nome)
