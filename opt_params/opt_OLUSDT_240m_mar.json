@@ -19,8 +19,8 @@
     "max_bars_in_trade": null
   },
   "best_score": {
-    "mar": 113.19690840737357,
-    "trades": 129.0
+    "mar": Infinity,
+    "trades": 125.0
   },
-  "generated_at": "2026-05-03 20:33:10"
+  "generated_at": "2026-05-17 11:33:42"
 }

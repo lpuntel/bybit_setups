@@ -3,10 +3,10 @@
   "interval": "240",
   "objective": "mar",
   "best_params": {
-    "atr_period": 28,
+    "atr_period": 14,
     "atr_method": "wilder",
     "k_sl": 0.8,
-    "k_tp": 1.2,
+    "k_tp": 5.0,
     "trailing": false,
     "breakeven_after_rr": null,
     "partial_tp_rr": null,
@@ -19,8 +19,8 @@
     "max_bars_in_trade": null
   },
   "best_score": {
-    "mar": Infinity,
-    "trades": 110.0
+    "mar": 74.31824438823968,
+    "trades": 111.0
   },
-  "generated_at": "2026-05-03 21:00:32"
+  "generated_at": "2026-05-17 12:03:48"
 }

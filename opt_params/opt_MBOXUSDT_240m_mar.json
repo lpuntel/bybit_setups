@@ -7,7 +7,7 @@
     "atr_method": "wilder",
     "k_sl": 0.8,
     "k_tp": 1.2,
-    "trailing": false,
+    "trailing": true,
     "breakeven_after_rr": null,
     "partial_tp_rr": null,
     "partial_frac": 0.5,
@@ -19,8 +19,8 @@
     "max_bars_in_trade": null
   },
   "best_score": {
-    "mar": Infinity,
-    "trades": 128.0
+    "mar": 113.97338641500265,
+    "trades": 126.0
   },
-  "generated_at": "2026-05-03 20:26:57"
+  "generated_at": "2026-05-17 11:26:45"
 }
