@@ -6,8 +6,8 @@
     "atr_period": 28,
     "atr_method": "wilder",
     "k_sl": 0.8,
-    "k_tp": 5.0,
-    "trailing": false,
+    "k_tp": 1.2,
+    "trailing": true,
     "breakeven_after_rr": null,
     "partial_tp_rr": null,
     "partial_frac": 0.5,
@@ -19,8 +19,8 @@
     "max_bars_in_trade": null
   },
   "best_score": {
-    "mar": 68.68183431344143,
-    "trades": 139.0
+    "mar": 69.63718173863329,
+    "trades": 141.0
   },
-  "generated_at": "2026-05-17 12:01:15"
+  "generated_at": "2026-06-07 18:15:57"
 }

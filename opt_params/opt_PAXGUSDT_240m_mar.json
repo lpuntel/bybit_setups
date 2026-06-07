@@ -3,7 +3,7 @@
   "interval": "240",
   "objective": "mar",
   "best_params": {
-    "atr_period": 7,
+    "atr_period": 5,
     "atr_method": "wilder",
     "k_sl": 2.5,
     "k_tp": 2.5,
@@ -19,8 +19,8 @@
     "max_bars_in_trade": null
   },
   "best_score": {
-    "mar": 6.509480628375107,
-    "trades": 111.0
+    "mar": 5.363178288519008,
+    "trades": 112.0
   },
-  "generated_at": "2026-05-17 11:36:25"
+  "generated_at": "2026-06-07 16:40:36"
 }
