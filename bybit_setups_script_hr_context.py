@@ -49,6 +49,10 @@ def normalize_timeframe(tf) -> str:
     except Exception:
         return str(tf).strip()
 
+def candle_key(par, timeframe):
+    """Chave única para candles por par + timeframe. Evita sobrescrever BTCUSDT 240 por BTCUSDT D."""
+    return (str(par).upper().strip(), normalize_timeframe(timeframe))
+
 # Define o fuso de Brasília (UTC-3)
 fuso_brasilia = timezone(timedelta(hours=-3))
 
@@ -72,7 +76,7 @@ PERIODOS_MINIMO = 30 #Número mínimo de períodos para considerar análise do a
 CASAS_DECIMAIS_GATILHO = 7  # Número de casas decimais para exibir os gatilhos
 ENVIAR_ALERTA_TELEGRAM = False  # Enviar alertas automáticos via Telegram
 DEBUG_MODE = False  # Para exibir mensagens detalhadas no futuro (opcional)
-GERAR_GRAFICOS = True   # True = gera gráficos | False = desativa gráficos
+GERAR_GRAFICOS = False   # True = gera gráficos | False = desativa gráficos
 
 # Parâmetros de Horário de Execução
 USAR_HORARIO_LOCAL = True
@@ -979,9 +983,17 @@ def enriquecer_candles_contexto(df, cfg):
 
 
 def calcular_forca_relativa(candles_dict, cfg):
+    """
+    Calcula força relativa por par/timeframe.
+    Importante: o ranking deve comparar ativos dentro do mesmo timeframe.
+    """
     rows = []
     min_len = max(cfg.rs_long_window + 2, 20)
-    for symbol, df in candles_dict.items():
+    for key, df in candles_dict.items():
+        if isinstance(key, tuple):
+            symbol, timeframe = key[0], key[1]
+        else:
+            symbol, timeframe = key, ""
         if df is None or df.empty or len(df) < min_len:
             continue
         fechados = df.iloc[:-1].copy() if len(df) > 1 else df.copy()
@@ -991,6 +1003,7 @@ def calcular_forca_relativa(candles_dict, cfg):
         last = close.iloc[-1]
         rows.append({
             "Par": symbol,
+            "Timeframe": timeframe,
             "RET_3C": _safe_div(last, close.iloc[-cfg.rs_short_window - 1]) - 1,
             "RET_6C": _safe_div(last, close.iloc[-cfg.rs_mid_window - 1]) - 1,
             "RET_12C": _safe_div(last, close.iloc[-cfg.rs_long_window - 1]) - 1,
@@ -999,9 +1012,11 @@ def calcular_forca_relativa(candles_dict, cfg):
     if rs.empty:
         return rs
     rs["RET_SCORE_RAW"] = rs[["RET_3C", "RET_6C", "RET_12C"]].mean(axis=1)
-    rs["RANK_FORCA"] = rs["RET_SCORE_RAW"].rank(pct=True) * 100
-    return rs.sort_values("RANK_FORCA", ascending=False).reset_index(drop=True)
-
+    if "Timeframe" in rs.columns:
+        rs["RANK_FORCA"] = rs.groupby("Timeframe")["RET_SCORE_RAW"].rank(pct=True) * 100
+    else:
+        rs["RANK_FORCA"] = rs["RET_SCORE_RAW"].rank(pct=True) * 100
+    return rs.sort_values(["Timeframe", "RANK_FORCA"], ascending=[True, False]).reset_index(drop=True)
 
 def calculate_orderbook_metrics_context(book, last_price):
     bids = book.get("b", []) or []
@@ -1294,8 +1309,12 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
     for _, linha in ativos_df.iterrows():
         resultado = str(linha.get('Último Setup Identificado', '')).strip()
         if resultado.startswith('ARMAR') or resultado.startswith('DISPARAR'):
-            par = linha['Par']
-            df = candles_dict.get(par)
+            par = str(linha['Par']).upper().strip()
+            tf_norm = normalize_timeframe(linha['Timeframe'])
+            df = candles_dict.get(candle_key(par, tf_norm))
+            # Compatibilidade com versões antigas que usavam somente o par como chave
+            if df is None:
+                df = candles_dict.get(par)
             if df is None or len(df) < 21:
                 continue
 
@@ -1313,7 +1332,6 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
             except Exception:
                 continue
 
-            tf_norm = normalize_timeframe(linha['Timeframe'])
             params = {
                 "atr_period": int(float(linha.get('_ATR_PERIOD', ATR_PERIODO_SLTP) or ATR_PERIODO_SLTP)),
                 "k_sl": float(linha.get('_K_SL', K_SL_PADRAO) or K_SL_PADRAO),
@@ -1465,12 +1483,15 @@ def gerar_excel_com_graficos(candles_dict, ativos_df, nome_arquivo='ativos_opt.x
 
     for _, linha in ativos_df.iterrows():
         resultado = linha['Último Setup Identificado']
-        par = linha['Par']
+        par = str(linha['Par']).upper().strip()
+        tf_norm = normalize_timeframe(linha['Timeframe'])
 
         if not (resultado.startswith('ARMAR') or resultado.startswith('DISPARAR')):
             continue
 
-        df = candles_dict.get(par)
+        df = candles_dict.get(candle_key(par, tf_norm))
+        if df is None:
+            df = candles_dict.get(par)
         if df is None or len(df) < 13:
             continue
 
@@ -1840,6 +1861,7 @@ def cli_optimize_from_excel(objective="mar", use_optuna=False, limit=1000, merca
         logging.info(f"[OPT-ALL] ✅ {par} {tf_norm}m salvo em {caminho_json(par, timeframe, objective)}")
 
     return 0
+
 
 # Lê o universo dinâmico da Bybit, aplica CONFIG_UNIVERSO/EXCECOES_ATIVOS e gera/atualiza os JSONs opt_*.json.
 def cli_optimize_from_universe(objective="mar", use_optuna=False, limit=1000, modo_universo=None, mercado_default="linear"):
@@ -2727,7 +2749,7 @@ if __name__ == "__main__":
             df = enriquecer_candles_contexto(df, context_cfg)
 
             # Armazena para gráficos e força relativa
-            candles_dict[par] = df.reset_index(drop=True)
+            candles_dict[candle_key(par, timeframe)] = df.reset_index(drop=True)
 
         except Exception as e:
             logging.error(f"Erro ao obter dados de {par}: {e}")
@@ -2757,7 +2779,8 @@ if __name__ == "__main__":
     FORCA_RELATIVA_DF = calcular_forca_relativa(candles_dict, context_cfg)
     rs_map = {}
     if FORCA_RELATIVA_DF is not None and not FORCA_RELATIVA_DF.empty:
-        rs_map = {str(r["Par"]).upper(): r for _, r in FORCA_RELATIVA_DF.iterrows()}
+        for _, r in FORCA_RELATIVA_DF.iterrows():
+            rs_map[candle_key(r["Par"], r.get("Timeframe", ""))] = r
 
     # Segundo passo: setups + score/contexto
     for idx, ativo in ativos_df.iterrows():
@@ -2766,7 +2789,8 @@ if __name__ == "__main__":
         par = str(ativo['Par']).upper().strip()
         timeframe = normalize_timeframe(ativo['Timeframe'])
         mercado = str(ativo.get('Mercado', context_cfg.category)).lower()
-        df = candles_dict.get(par)
+        key_tf = candle_key(par, timeframe)
+        df = candles_dict.get(key_tf)
 
         if df is None or df.empty or len(df) < PERIODOS_MINIMO:
             if str(ativos_df.at[idx, 'Último Setup Identificado']) in ["", "nan"]:
@@ -2890,7 +2914,7 @@ if __name__ == "__main__":
                     logging.warning(f"[CTX] Contexto profundo falhou para {par}: {exc}")
 
                 aplicar_contexto_na_linha(
-                    ativos_df, idx, df, nome_setup, direcao_swing, contexto, rs_map.get(par),
+                    ativos_df, idx, df, nome_setup, direcao_swing, contexto, rs_map.get(key_tf),
                     context_cfg, gatilho=resultado['gatilho'], tp=tp_est, sl=sl_est, swing_pct=swing_pct_setup
                 )
 
