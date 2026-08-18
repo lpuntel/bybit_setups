@@ -48,23 +48,26 @@ STATUS_EXPIRADO = "EXPIRADO"
 STATUS_CANCELADO = "CANCELADO"
 
 # Cabeçalhos esperados na aba MONITOR.
-# Campos de lógica: ATIVO, MERCADO, GATILHO, TOLERANCIA_PCT, VALIDADE_ATE, STATUS.
-# Campos informativos: todos os demais entram apenas na mensagem do Telegram.
+# Campos usados na lógica: ATIVO, MERCADO, GATILHO, TOLERANCIA_PCT, VALIDADE_ATE, STATUS.
+# Campos preenchidos pelo script: STATUS, PRECO_ALERTA, DISTANCIA_ALERTA_PCT, ALERTADO_EM, OBSERVACAO.
+# Campos informativos: os demais entram apenas na mensagem do Telegram.
 HEADERS = [
     "ATIVO",
     "TIMEFRAME",
     "MERCADO",
+    "TIME_STAMP",
     "SETUP",
     "DIRECAO",
-    "GATILHO",
     "TOLERANCIA_PCT",
     "VALIDADE_ATE",
     "FAIXA_MIN",
     "FAIXA_MAX",
     "NUM_GRIDS",
     "TRAILING_STOP",
+    "GATILHO",
     "TAKE_PROFIT",
     "STOP_LOSS",
+    "TP/SL",
     "STATUS",
     "PRECO_ALERTA",
     "DISTANCIA_ALERTA_PCT",
@@ -267,14 +270,21 @@ def build_alert_message(values: Dict[str, Any], preco_atual: float, distancia_pc
     else:
         validade_txt = fmt_value(validade)
 
+    time_stamp = values.get("TIME_STAMP")
+    if isinstance(time_stamp, datetime):
+        time_stamp_txt = time_stamp.strftime("%d/%m/%Y %H:%M")
+    else:
+        time_stamp_txt = fmt_value(time_stamp)
+
     lines = [
         "🚨 Gatilho dentro do range Bybit",
         "",
-        f"Par: {fmt_value(values.get('ATIVO'))}",
-        f"Setup: {fmt_value(values.get('SETUP'))}",
-        f"Direção: {fmt_value(values.get('DIRECAO'))}",
+        f"Ativo: {fmt_value(values.get('ATIVO'))}",
         f"Timeframe: {fmt_value(values.get('TIMEFRAME'))}",
         f"Mercado: {fmt_value(values.get('MERCADO'))}",
+        f"Time stamp: {time_stamp_txt}",
+        f"Setup: {fmt_value(values.get('SETUP'))}",
+        f"Direção: {fmt_value(values.get('DIRECAO'))}",
         "",
         f"Gatilho: {fmt_value(values.get('GATILHO'))}",
         f"Preço atual: {fmt_value(preco_atual)}",
@@ -287,6 +297,7 @@ def build_alert_message(values: Dict[str, Any], preco_atual: float, distancia_pc
         f"Trailing Stop: {fmt_value(values.get('TRAILING_STOP'))}",
         f"Take Profit: {fmt_value(values.get('TAKE_PROFIT'))}",
         f"Stop Loss: {fmt_value(values.get('STOP_LOSS'))}",
+        f"TP/SL: {fmt_value(values.get('TP/SL'))}",
         "",
         "Já é possível tentar configurar o robô na Bybit.",
     ]
