@@ -1,4 +1,4 @@
-# Monitor Spot Grid v2.3
+# Monitor Spot Grid v2.5
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -13,11 +13,13 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from bybit_spot_common import get_ticker
+from bybit_spot_common import get_ticker, get_kline, normalize_timeframe
 from bybit_setups_script_hr_context_spot import (
     capturar_contexto_spot,
+    escolher_setup_spot,
     ler_config_spot,
     validar_parametros_bybit,
+    legacy,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -185,6 +187,119 @@ def hard_revalidation(par, cfg, ticker):
     return len(reasons) == 0, reasons, ctx
 
 
+def technical_revalidation(row, cfg):
+    par = str(row["Par"]).strip().upper()
+    tf = normalize_timeframe(row["Timeframe"])
+    expected_setup = str(row.get("Setup", "")).strip()
+
+    limit = min(
+        1000,
+        max(
+            legacy.PERIODOS_MINIMO + 10,
+            cfg.kline_limit,
+            cfg.percentile_lookback + 50,
+        ),
+    )
+
+    try:
+        df = get_kline(par, tf, limit=limit)
+    except Exception as exc:
+        return False, [f"candles_erro:{type(exc).__name__}"], {}
+
+    if df is None or df.empty or len(df) < legacy.PERIODOS_MINIMO:
+        return False, ["candles_insuficientes"], {}
+
+    try:
+        df["MME9"] = df["close"].ewm(span=9).mean()
+        df["MMA21"] = df["close"].rolling(21).mean()
+        df = legacy.enriquecer_candles_contexto(df, cfg)
+        signal = escolher_setup_spot(df, par)
+    except Exception as exc:
+        return False, [f"tecnico_erro:{type(exc).__name__}"], {}
+
+    if not signal:
+        return False, ["setup_ausente"], {}
+
+    status = str(signal.get("status", "")).upper().strip()
+    direction = str(signal.get("tipo", "")).upper().strip()
+    parts = status.split()
+    setup_now = parts[2] if len(parts) >= 3 else ""
+    trigger_now = _float(signal.get("gatilho"))
+
+    reasons = []
+
+    if direction != "COMPRA":
+        reasons.append("sinal_nao_compra")
+
+    if setup_now != expected_setup:
+        reasons.append(f"setup_mudou:{expected_setup}->{setup_now or '?'}")
+
+    if not status.startswith("DISPARAR"):
+        reasons.append(f"status_atual:{status or '?'}")
+
+    last_closed = df.iloc[-2]
+    atr_pct_real = _float(last_closed.get("ATR_PCT"))
+    atr_pct_real = atr_pct_real * 100.0 if atr_pct_real is not None else None
+
+    if atr_pct_real is None:
+        reasons.append("atr_indisponivel")
+    else:
+        if atr_pct_real < cfg.atr_close_min_pct:
+            reasons.append("atr_close_baixo")
+        if atr_pct_real > cfg.atr_close_max_pct:
+            reasons.append("atr_close_alto")
+
+    info = {
+        "setup_atual": setup_now,
+        "status_atual": status,
+        "direcao_atual": direction,
+        "gatilho_atual": trigger_now,
+        "atr_pct_atual": atr_pct_real,
+        "candle_fechado": str(last_closed.get("timestamp", "")),
+    }
+
+    return len(reasons) == 0, reasons, info
+
+
+def technical_check_all(verbose=True):
+    cfg = ler_config_spot()
+    candidates = load_candidates()
+
+    ok_count = 0
+    blocked_count = 0
+
+    print("=" * 90)
+    print("REVALIDAÇÃO TÉCNICA ATUAL")
+    print("=" * 90)
+
+    for _, row in candidates.iterrows():
+        ok, reasons, info = technical_revalidation(row, cfg)
+
+        if ok:
+            ok_count += 1
+            status = "OK"
+        else:
+            blocked_count += 1
+            status = ";".join(reasons)
+
+        if verbose:
+            print(
+                f"{str(row['Par']):<14} "
+                f"{str(row['Timeframe']):>4} "
+                f"{str(row['Setup']):>4} | "
+                f"{status:<45} | "
+                f"setup_atual={info.get('setup_atual', '-')} "
+                f"atr={info.get('atr_pct_atual', '-')}"
+            )
+
+    print("-" * 90)
+    print(
+        f"TOTAL={len(candidates)} | "
+        f"TECNICO_OK={ok_count} | "
+        f"TECNICO_BLOQUEADO={blocked_count}"
+    )
+
+
 def build_ready_message(row, last, ctx):
     score = _float(row.get("SCORE_TOTAL"), 0.0)
     return (
@@ -277,6 +392,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         "prealertas": 0,
         "prontos": 0,
         "bloqueados_revalidacao": 0,
+        "bloqueados_tecnico": 0,
         "bybit_invalidos": 0,
     }
 
@@ -341,6 +457,19 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                 )
             continue
 
+        technical_ok, technical_reasons, technical_info = technical_revalidation(
+            row,
+            cfg,
+        )
+        if not technical_ok:
+            stats["bloqueados_tecnico"] += 1
+            if verbose:
+                print(
+                    f"[TÉCNICO] {par} {row['Timeframe']} bloqueado: "
+                    + ";".join(technical_reasons)
+                )
+            continue
+
         grid = grid_dict(row)
         bybit_ok, bybit_reason = validar_parametros_bybit(
             grid,
@@ -379,6 +508,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             f"prealertas={stats['prealertas']} "
             f"prontos={stats['prontos']} "
             f"revalidacao_bloq={stats['bloqueados_revalidacao']} "
+            f"tecnico_bloq={stats['bloqueados_tecnico']} "
             f"bybit_invalidos={stats['bybit_invalidos']}"
         )
 
@@ -386,16 +516,19 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.3")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.5")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--prime-state", action="store_true")
+    p.add_argument("--technical-check", action="store_true")
     p.add_argument("--quiet", action="store_true")
     a = p.parse_args()
 
-    if a.prime_state:
+    if a.technical_check:
+        technical_check_all(verbose=not a.quiet)
+    elif a.prime_state:
         prime_state(tolerance_pct=a.tolerance_pct)
     elif a.once:
         once(
