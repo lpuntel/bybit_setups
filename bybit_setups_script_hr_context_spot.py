@@ -549,7 +549,9 @@ def capturar_contexto_spot(symbol: str, cfg: SpotContextConfig, ticker_row=None)
 def score_spot_candidate(direction: str, setup: str, last_row, context, rs_row, cfg: SpotContextConfig):
     direction = str(direction).upper()
     is_buy = direction == "COMPRA"
-    blocks = []
+
+    hard_blocks = []
+    soft_alerts = []
 
     turnover = _to_float(context.get("Turnover24h"), 0.0)
     spread = _to_float(context.get("Spread_Pct"))
@@ -563,9 +565,13 @@ def score_spot_candidate(direction: str, setup: str, last_row, context, rs_row, 
         100.0 if pd.isna(slippage) or slippage <= cfg.max_slippage_pct else max(0.0, 100 - (slippage / cfg.max_slippage_pct - 1) * 100),
     ]
     score_liq = float(np.nanmean(liq_parts))
-    if turnover < cfg.min_turnover24h_usdt: blocks.append("turnover24h_baixo")
-    if not pd.isna(spread) and spread > cfg.max_spread_pct: blocks.append("spread_alto")
-    if not pd.isna(depth) and depth < cfg.min_depth_1pct_usdt: blocks.append("depth_baixo")
+
+    if turnover < cfg.min_turnover24h_usdt:
+        hard_blocks.append("turnover24h_baixo")
+    if not pd.isna(spread) and spread > cfg.max_spread_pct:
+        hard_blocks.append("spread_alto")
+    if not pd.isna(depth) and depth < cfg.min_depth_1pct_usdt:
+        hard_blocks.append("depth_baixo")
 
     adx = _to_float(last_row.get("ADX"))
     chop = _to_float(last_row.get("CHOP"))
@@ -579,21 +585,47 @@ def score_spot_candidate(direction: str, setup: str, last_row, context, rs_row, 
         min(100, er / cfg.er_min_trend * 100) if not pd.isna(er) else 50,
     ]
     score_regime = float(np.nanmean(regime_parts))
-    if not pd.isna(atr_pct) and atr_pct < cfg.atr_close_min_pct: blocks.append("atr_close_baixo")
-    if not pd.isna(atr_pct) and atr_pct > cfg.atr_close_max_pct: blocks.append("atr_close_alto")
+
+    if not pd.isna(atr_pct) and atr_pct < cfg.atr_close_min_pct:
+        hard_blocks.append("atr_close_baixo")
+    if not pd.isna(atr_pct) and atr_pct > cfg.atr_close_max_pct:
+        hard_blocks.append("atr_close_alto")
+
     if setup in {"9.2", "9.3", "9.4", "PC"} and regime != "TENDENCIA":
-        blocks.append(f"regime_{regime.lower()}_nao_ideal")
+        soft_alerts.append(f"regime_{regime.lower()}_nao_ideal")
 
     rank = _to_float(rs_row.get("RANK_FORCA")) if rs_row is not None else np.nan
     score_strength = rank if not pd.isna(rank) else 50.0
+
     if is_buy and not pd.isna(rank) and rank < cfg.rs_min_long:
-        blocks.append("forca_relativa_insuficiente")
+        soft_alerts.append("forca_relativa_insuficiente")
 
     setup_base = {"9.1": 60, "9.2": 75, "9.3": 75, "9.4": 70, "PC": 78}.get(setup, 65)
-    score_total = score_liq * 0.30 + score_regime * 0.25 + score_strength * 0.25 + setup_base * 0.20
 
-    hard = {"turnover24h_baixo", "spread_alto", "depth_baixo", "atr_close_baixo", "atr_close_alto"}
-    approved = is_buy and score_total >= cfg.score_min_setup and not any(x in hard for x in blocks)
+    score_total = (
+        score_liq * 0.30
+        + score_regime * 0.25
+        + score_strength * 0.25
+        + setup_base * 0.20
+    )
+
+    approved = (
+        is_buy
+        and score_total >= cfg.score_min_setup
+        and not hard_blocks
+    )
+
+    if not is_buy:
+        status_score = "NAO_COMPRA"
+    elif hard_blocks:
+        status_score = "BLOQUEADO_HARD"
+    elif score_total < cfg.score_min_setup:
+        status_score = "SCORE_INSUFICIENTE"
+    else:
+        status_score = "APROVADO"
+
+    all_reasons = hard_blocks + soft_alerts
+
     return {
         "REGIME_TECNICO": regime,
         "SCORE_TOTAL": round(score_total, 2),
@@ -603,9 +635,11 @@ def score_spot_candidate(direction: str, setup: str, last_row, context, rs_row, 
         "SCORE_SETUP_BASE": setup_base,
         "RANK_FORCA": rank,
         "APROVADO_SCORE": bool(approved),
-        "BLOQUEIO_MOTIVO": ";".join(blocks),
+        "STATUS_SCORE": status_score,
+        "BLOQUEIO_HARD": ";".join(hard_blocks),
+        "ALERTA_SOFT": ";".join(soft_alerts),
+        "BLOQUEIO_MOTIVO": ";".join(all_reasons),
     }
-
 
 def escolher_setup_spot(df, symbol):
     """Prioridade: DISPARAR COMPRA > ARMAR COMPRA > DISPARAR VENDA > ARMAR VENDA."""
