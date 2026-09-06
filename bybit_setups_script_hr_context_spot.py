@@ -66,9 +66,13 @@ class SpotContextConfig:
     modo_universo: str = "HIBRIDO"          # AUTO | HIBRIDO | MANUAL
     category: str = "spot"
     quote_coin: str = "USDT"
-    min_age_days: int = 90
-    default_timeframes: str = "240"
+    historico_min_dias: int = 90
+    default_timeframes: str = "120,240,360,D"
     kline_limit: int = 250
+    excluir_stablecoins: bool = True
+    stablecoins_excluir: str = "USDT,USDC,DAI,FDUSD,TUSD,PYUSD,USDE,USD1,USDS,EURC"
+    excluir_st_tag: bool = True
+    symbol_types_excluir: str = "xstocks"
 
     # Liquidez / execução (frações quando indicado)
     min_turnover24h_usdt: float = 1_000_000
@@ -187,7 +191,12 @@ ALIASES = {
     "MODO_UNIVERSO": "modo_universo",
     "TIMEFRAMES_PADRAO": "default_timeframes",
     "KLINE_LIMIT": "kline_limit",
-    "IDADE_MIN_DIAS": "min_age_days",
+    "IDADE_MIN_DIAS": "historico_min_dias",
+    "HISTORICO_MIN_DIAS": "historico_min_dias",
+    "EXCLUIR_STABLECOINS": "excluir_stablecoins",
+    "STABLECOINS_EXCLUIR": "stablecoins_excluir",
+    "EXCLUIR_ST_TAG": "excluir_st_tag",
+    "SYMBOL_TYPES_EXCLUIR": "symbol_types_excluir",
     "TURNOVER24H_MIN": "min_turnover24h_usdt",
     "MIN_TURNOVER": "min_turnover24h_usdt",
     "SPREAD_MAX_PCT": "max_spread_pct",
@@ -289,51 +298,155 @@ def ler_manual(path=ARQUIVO_EXCEL) -> pd.DataFrame:
         return pd.DataFrame(columns=["ATIVO", "Par", "Timeframe", "Mercado"])
 
 
+# === SPOT_V21_UNIVERSE =======================================================
+def _csv_upper_set(value) -> set[str]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return set()
+    return {
+        x.strip().upper()
+        for x in str(value).replace(";", ",").split(",")
+        if x.strip()
+    }
+
+
+def checar_historico_minimo_spot(symbol: str, dias: int):
+    # Spot não fornece launchTime. Confirma se havia negociação há 'dias'.
+    dias = max(0, int(dias or 0))
+    if dias == 0:
+        return True, None, "DESATIVADO"
+
+    alvo = datetime.now(timezone.utc) - timedelta(days=dias)
+    inicio = int((alvo - timedelta(days=3)).timestamp() * 1000)
+    fim = int(alvo.timestamp() * 1000)
+
+    try:
+        hist = get_kline(symbol, "D", limit=5, start=inicio, end=fim)
+        if hist is None or hist.empty:
+            return False, None, "INSUFICIENTE"
+
+        ts = pd.to_datetime(hist["timestamp"], utc=True, errors="coerce").dropna()
+        ts = ts[ts <= pd.Timestamp(alvo)]
+        if ts.empty:
+            return False, None, "INSUFICIENTE"
+
+        return True, ts.max().strftime("%Y-%m-%d"), "OK"
+    except Exception as exc:
+        logging.warning("[SPOT] Histórico mínimo %s: %s", symbol, exc)
+        return False, None, "ERRO"
+
+
 def montar_universo_spot(manual_df: pd.DataFrame, cfg: SpotContextConfig):
+    mode = str(cfg.modo_universo).upper().strip()
+    if mode not in {"AUTO", "HIBRIDO", "MANUAL"}:
+        mode = "HIBRIDO"
+
+    default_tfs = _split_timeframes(cfg.default_timeframes)
+
+    stablecoins = _csv_upper_set(cfg.stablecoins_excluir)
+    excluded_symbol_types = {
+        x.lower() for x in _csv_upper_set(cfg.symbol_types_excluir)
+    }
+
     instruments = get_spot_instruments()
     tickers = get_spot_tickers()
     tmap = {x.get("symbol"): x for x in tickers if x.get("symbol")}
 
     rows = []
+    candidatos_historico = 0
+
     for inst in instruments:
         symbol = str(inst.get("symbol", "")).upper().strip()
         if not symbol:
             continue
+
         ticker = tmap.get(symbol, {})
         status = inst.get("status")
-        quote = inst.get("quoteCoin")
-        age_days = _days_since_ms(inst.get("launchTime"))
+        base_coin = str(inst.get("baseCoin", "")).upper().strip()
+        quote = str(inst.get("quoteCoin", "")).upper().strip()
+        st_tag = str(inst.get("stTag", "0")).strip()
+        symbol_type = str(inst.get("symbolType", "") or "").strip()
+
         last = _to_float(ticker.get("lastPrice"))
         bid = _to_float(ticker.get("bid1Price"))
         ask = _to_float(ticker.get("ask1Price"))
         spread = _safe_div(ask - bid, last) if last and bid and ask else np.nan
         turnover = _to_float(ticker.get("turnover24h"), 0.0)
 
-        structural_ok = (
+        stablecoin_base = base_coin in stablecoins
+        st_tag_ok = (not cfg.excluir_st_tag) or st_tag != "1"
+        symbol_type_ok = (
+            not symbol_type
+            or symbol_type.lower() not in excluded_symbol_types
+        )
+        stable_ok = (not cfg.excluir_stablecoins) or not stablecoin_base
+
+        structural_pre = (
             status == "Trading"
             and quote == cfg.quote_coin
-            and (age_days is None or age_days >= cfg.min_age_days)
+            and stable_ok
+            and st_tag_ok
+            and symbol_type_ok
         )
         liquidity_ok = (
             turnover >= cfg.min_turnover24h_usdt
             and (pd.isna(spread) or spread <= cfg.max_spread_pct)
         )
+
+        historico_ok = None
+        historico_ref = None
+        historico_status = "NAO_AVALIADO"
+
+        if mode != "MANUAL" and structural_pre and liquidity_ok:
+            candidatos_historico += 1
+            historico_ok, historico_ref, historico_status = checar_historico_minimo_spot(
+                symbol, cfg.historico_min_dias
+            )
+            if cfg.api_sleep_s:
+                time.sleep(cfg.api_sleep_s)
+
+        structural_ok = (
+            structural_pre
+            if mode == "MANUAL"
+            else structural_pre and bool(historico_ok)
+        )
+
         reasons = []
-        if status != "Trading": reasons.append("status_not_trading")
-        if quote != cfg.quote_coin: reasons.append("quote_not_usdt")
-        if age_days is not None and age_days < cfg.min_age_days: reasons.append("young_asset")
-        if turnover < cfg.min_turnover24h_usdt: reasons.append("turnover24h_baixo")
-        if not pd.isna(spread) and spread > cfg.max_spread_pct: reasons.append("spread_alto")
+        if status != "Trading":
+            reasons.append("status_not_trading")
+        if quote != cfg.quote_coin:
+            reasons.append("quote_not_usdt")
+        if cfg.excluir_stablecoins and stablecoin_base:
+            reasons.append("stablecoin_base")
+        if cfg.excluir_st_tag and st_tag == "1":
+            reasons.append("st_tag")
+        if symbol_type and symbol_type.lower() in excluded_symbol_types:
+            reasons.append("symbol_type_excluido")
+        if turnover < cfg.min_turnover24h_usdt:
+            reasons.append("turnover24h_baixo")
+        if not pd.isna(spread) and spread > cfg.max_spread_pct:
+            reasons.append("spread_alto")
+        if mode != "MANUAL" and structural_pre and liquidity_ok and not historico_ok:
+            reasons.append(
+                "historico_erro"
+                if historico_status == "ERRO"
+                else "historico_insuficiente"
+            )
 
         lot = inst.get("lotSizeFilter", {}) or {}
         price_filter = inst.get("priceFilter", {}) or {}
+
         rows.append({
             "Par": symbol,
             "Status": status,
-            "BaseCoin": inst.get("baseCoin"),
+            "BaseCoin": base_coin,
             "QuoteCoin": quote,
-            "LaunchTime": inst.get("launchTime"),
-            "Idade_Dias": age_days,
+            "STTag": st_tag,
+            "SymbolType": symbol_type,
+            "Stablecoin_Base": stablecoin_base,
+            "Historico_Min_Dias": cfg.historico_min_dias,
+            "Historico_OK": historico_ok,
+            "Historico_Referencia_UTC": historico_ref,
+            "Historico_Status": historico_status,
             "TickSize": price_filter.get("tickSize"),
             "MinOrderQty": lot.get("minOrderQty"),
             "MinOrderAmt": lot.get("minOrderAmt"),
@@ -356,9 +469,12 @@ def montar_universo_spot(manual_df: pd.DataFrame, cfg: SpotContextConfig):
             ["Elegivel_Universo", "Turnover24h"], ascending=[False, False]
         ).reset_index(drop=True)
 
-    mode = str(cfg.modo_universo).upper().strip()
-    if mode not in {"AUTO", "HIBRIDO", "MANUAL"}:
-        mode = "HIBRIDO"
+    if mode != "MANUAL":
+        logging.info(
+            "[SPOT] Histórico mínimo=%d dias avaliado em %d candidato(s).",
+            cfg.historico_min_dias,
+            candidatos_historico,
+        )
 
     manual = manual_df.copy()
     if not manual.empty:
@@ -366,18 +482,24 @@ def montar_universo_spot(manual_df: pd.DataFrame, cfg: SpotContextConfig):
             manual = manual[manual["ATIVO"].fillna(False).astype(bool)]
         manual["Par"] = manual["Par"].astype(str).str.upper().str.strip()
         manual["Mercado"] = "spot"
+        manual["Timeframe"] = manual["Timeframe"].apply(normalize_timeframe)
 
     if mode == "MANUAL":
         return manual.reset_index(drop=True), universo, tmap
 
-    default_tfs = _split_timeframes(cfg.default_timeframes)
     auto_rows = []
     if not universo.empty:
         for _, u in universo[universo["Elegivel_Universo"] == True].iterrows():
             for tf in default_tfs:
-                d = {"ATIVO": True, "Par": u["Par"], "Timeframe": tf, "Mercado": "spot"}
+                d = {
+                    "ATIVO": True,
+                    "Par": u["Par"],
+                    "Timeframe": tf,
+                    "Mercado": "spot",
+                }
                 d.update(u.to_dict())
                 auto_rows.append(d)
+
     auto = pd.DataFrame(auto_rows)
 
     if mode == "AUTO" or manual.empty:
@@ -390,9 +512,17 @@ def montar_universo_spot(manual_df: pd.DataFrame, cfg: SpotContextConfig):
     if not scan.empty:
         scan["Mercado"] = "spot"
         scan["Timeframe"] = scan["Timeframe"].apply(normalize_timeframe)
-        scan = scan.drop_duplicates(subset=["Par", "Timeframe"], keep="last").reset_index(drop=True)
-    return scan, universo, tmap
+        scan = scan.drop_duplicates(
+            subset=["Par", "Timeframe"], keep="last"
+        ).reset_index(drop=True)
 
+    logging.info(
+        "[SPOT] Universo elegível=%d | timeframes=%s | linhas para scan=%d",
+        int(universo["Elegivel_Universo"].sum()) if not universo.empty else 0,
+        ",".join(default_tfs),
+        len(scan),
+    )
+    return scan, universo, tmap
 
 def capturar_contexto_spot(symbol: str, cfg: SpotContextConfig, ticker_row=None) -> dict:
     ticker = ticker_row or {}

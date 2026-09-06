@@ -11,16 +11,30 @@ BASE_URL = "https://api.bybit.com"
 CATEGORY = "spot"
 _SESSION = requests.Session()
 
+SUPPORTED_INTERVALS = {"1","3","5","15","30","60","120","240","360","720","D","W","M"}
+
 
 def normalize_timeframe(tf) -> str:
+    # Normaliza e valida os intervalos oficiais aceitos pela Bybit V5.
     s = str(tf).strip().upper()
     if s in {"D", "1D", "1440", "1444"}:
-        return "D"
-    try:
-        return str(int(float(s)))
-    except Exception:
-        return s
+        out = "D"
+    elif s in {"W", "1W"}:
+        out = "W"
+    elif s in {"M", "1M"}:
+        out = "M"
+    else:
+        try:
+            out = str(int(float(s)))
+        except Exception:
+            out = s
 
+    if out not in SUPPORTED_INTERVALS:
+        validos = "1,3,5,15,30,60,120,240,360,720,D,W,M"
+        raise ValueError(
+            f"Timeframe '{tf}' não é suportado pela Bybit V5. Use um de: {validos}"
+        )
+    return out
 
 def _get(path: str, params: dict | None = None) -> dict:
     r = _SESSION.get(BASE_URL + path, params=params or {}, timeout=20)
@@ -31,13 +45,25 @@ def _get(path: str, params: dict | None = None) -> dict:
     return data
 
 
-def get_kline(symbol: str, interval, limit: int = 300) -> pd.DataFrame:
-    data = _get("/v5/market/kline", {
+def get_kline(
+    symbol: str,
+    interval,
+    limit: int = 300,
+    start: int | None = None,
+    end: int | None = None,
+) -> pd.DataFrame:
+    params = {
         "category": CATEGORY,
         "symbol": symbol.upper(),
         "interval": normalize_timeframe(interval),
         "limit": min(int(limit), 1000),
-    })
+    }
+    if start is not None:
+        params["start"] = int(start)
+    if end is not None:
+        params["end"] = int(end)
+
+    data = _get("/v5/market/kline", params)
     rows = data["result"]["list"]
     if not rows:
         return pd.DataFrame()
@@ -48,7 +74,6 @@ def get_kline(symbol: str, interval, limit: int = 300) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["timestamp"] = pd.to_datetime(pd.to_numeric(df["startTime"]), unit="ms", utc=True)
     return df.sort_values("timestamp").reset_index(drop=True)
-
 
 def get_ticker(symbol: str) -> dict:
     rows = _get("/v5/market/tickers", {
