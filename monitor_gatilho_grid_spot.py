@@ -59,6 +59,30 @@ def _fmt_price(v):
     return f"{x:.10f}".rstrip("0").rstrip(".")
 
 
+def _fmt_int(v):
+    x = _float(v)
+    return "-" if x is None else str(int(round(x)))
+
+
+def _fmt_pct_value(v, decimals=3):
+    x = _float(v)
+    return "-" if x is None else f"{x:.{decimals}f}%"
+
+
+def _fmt_pct_fraction(v, decimals=3):
+    x = _float(v)
+    return "-" if x is None else f"{x * 100:.{decimals}f}%"
+
+
+def _fmt_depth(v):
+    x = _float(v)
+    return "-" if x is None else f"{x:,.0f} USDT"
+
+
+def _fmt_yesno(v):
+    return "SIM" if _bool(v) else "NÃO"
+
+
 def load_state():
     if not STATE_FILE.exists():
         return {}
@@ -79,10 +103,13 @@ def save_state(state):
 
 
 def candidate_key(row):
+    gat = _float(row.get("GATILHO"))
+    gat_key = f"{gat:.12g}" if gat is not None else ""
     return "|".join([
         str(row.get("Par", "")).upper(),
         str(row.get("Timeframe", "")),
         str(row.get("Setup", "")),
+        gat_key,
     ])
 
 
@@ -165,10 +192,12 @@ def build_ready_message(row, last, ctx):
         f"Preço: {_fmt_price(last)} | Gatilho: {_fmt_price(row.get('GATILHO'))}\n"
         f"Score: {score:.2f}\n"
         f"Faixa: {_fmt_price(row.get('LOWER'))} - {_fmt_price(row.get('UPPER'))}\n"
-        f"Grids: {row.get('GRIDS', '')} | Líq/grid est.: {row.get('GRID_NET_EST_PCT', '')}%\n"
+        f"Grids: {_fmt_int(row.get('GRIDS'))} | Líq/grid est.: {_fmt_pct_value(row.get('GRID_NET_EST_PCT'))}\n"
         f"TP: {_fmt_price(row.get('TP'))} | SL: {_fmt_price(row.get('SL'))}\n"
-        f"TS retração: {row.get('TS_RETRACAO_PCT', '')}% | Trailing Up: {row.get('TRAILING_UP', '')}\n"
-        f"Depth 1%: {ctx.get('DepthMin1Pct', '')} | Spread: {ctx.get('Spread_Pct', '')}"
+        f"TS retração: {_fmt_pct_value(row.get('TS_RETRACAO_PCT'), 2)} | "
+        f"Trailing Up: {_fmt_yesno(row.get('TRAILING_UP'))}\n"
+        f"Depth 1%: {_fmt_depth(ctx.get('DepthMin1Pct'))} | "
+        f"Spread: {_fmt_pct_fraction(ctx.get('Spread_Pct'))}"
     )
 
 
@@ -180,7 +209,56 @@ def build_near_message(row, last, dist_pct):
         f"Distância: {dist_pct:.3f}%\n"
         f"Score: {_float(row.get('SCORE_TOTAL'), 0.0):.2f}\n"
         f"Faixa prevista: {_fmt_price(row.get('LOWER'))} - {_fmt_price(row.get('UPPER'))}\n"
-        f"Grids: {row.get('GRIDS', '')}"
+        f"Grids: {_fmt_int(row.get('GRIDS'))}"
+    )
+
+
+def prime_state(tolerance_pct=1.0):
+    candidates = load_candidates()
+    state = {}
+    ready_count = 0
+    near_count = 0
+
+    for _, row in candidates.iterrows():
+        key = candidate_key(row)
+        decision = str(row["DECISAO_SPOT"]).strip().upper()
+        rec = {
+            "prealert_sent": False,
+            "ready_sent": False,
+            "last_decision": decision,
+        }
+
+        par = str(row["Par"]).strip().upper()
+        ticker = get_ticker(par)
+        last = _float(ticker.get("lastPrice"), 0.0)
+        gat = _float(row.get("GATILHO"), 0.0)
+
+        if decision == "GRID" and _bool(row.get("PARAMETROS_BYBIT_VALIDOS")):
+            rec["ready_sent"] = True
+            rec["ready_price"] = last
+            rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
+            ready_count += 1
+
+        elif decision == "AGUARDAR_GATILHO" and last and gat:
+            dist_abs = abs(last / gat - 1.0) * 100.0
+
+            if last >= gat:
+                rec["ready_sent"] = True
+                rec["ready_price"] = last
+                rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
+                ready_count += 1
+            elif dist_abs <= tolerance_pct:
+                rec["prealert_sent"] = True
+                near_count += 1
+
+        state[key] = rec
+
+    save_state(state)
+    print(
+        f"[PRIME] estado inicializado sem Telegram | "
+        f"candidatos={len(candidates)} "
+        f"já_prontos={ready_count} "
+        f"já_próximos={near_count}"
     )
 
 
@@ -313,10 +391,13 @@ if __name__ == "__main__":
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--prime-state", action="store_true")
     p.add_argument("--quiet", action="store_true")
     a = p.parse_args()
 
-    if a.once:
+    if a.prime_state:
+        prime_state(tolerance_pct=a.tolerance_pct)
+    elif a.once:
         once(
             tolerance_pct=a.tolerance_pct,
             dry_run=a.dry_run,
