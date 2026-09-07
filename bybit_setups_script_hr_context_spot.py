@@ -719,20 +719,36 @@ def carregar_params(par, timeframe, objective="mar"):
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         bp = data.get("best_params", data)
+        schema = int(float(data.get("schema_version", bp.get("schema_version", 0))))
+        model = str(bp.get("optimizer_model", data.get("optimizer_model", "")))
+        if schema < 2 or model != "LOW_SETUP_TRAILING_V1":
+            return None
         return {
+            "schema_version": schema,
+            "optimizer_model": model,
             "atr_period": int(float(bp.get("atr_period", 14))),
-            "k_sl": float(bp.get("k_sl", 1.5)),
-            "k_tp": float(bp.get("k_tp", 2.5)),
-            "origem": "otimizado_spot",
+            "range_atr_up": float(bp.get("range_atr_up", 3.0)),
+            "min_net_grid_pct": float(bp.get("min_net_grid_pct", 0.15)),
+            "trailing_slope_pct": float(bp.get("trailing_slope_pct", 0.75)),
+            "trailing_up_steps": int(float(bp.get("trailing_up_steps", 3))),
+            "tp_extra_grids": int(float(bp.get("tp_extra_grids", 1))),
+            "sl_buffer_ticks": int(float(bp.get("sl_buffer_ticks", 2))),
+            "max_bars": int(float(bp.get("max_bars", 30))),
+            "origem": "otimizado_grid_v2",
             "generated_at": data.get("generated_at"),
         }
     except Exception as exc:
         logging.warning("[OPT-SPOT] Falha lendo %s: %s", p, exc)
         return None
 
-
 def params_validos(params, days=REOTIMIZAR_APOS_DIAS):
-    if not params or not params.get("generated_at"):
+    if not params:
+        return False
+    if int(params.get("schema_version", 0)) < 2:
+        return False
+    if params.get("optimizer_model") != "LOW_SETUP_TRAILING_V1":
+        return False
+    if not params.get("generated_at"):
         return False
     try:
         dt = datetime.strptime(params["generated_at"], "%Y-%m-%d %H:%M:%S")
@@ -740,11 +756,24 @@ def params_validos(params, days=REOTIMIZAR_APOS_DIAS):
     except Exception:
         return False
 
-
 def garantir_params_spot(par, timeframe, df, cfg, objective="mar", auto_optimize=False, tick_size=0.01):
     params = carregar_params(par, timeframe, objective)
     if params and params_validos(params):
         return params
+
+    defaults = {
+        "schema_version": 2,
+        "optimizer_model": "LOW_SETUP_TRAILING_V1",
+        "atr_period": 14,
+        "range_atr_up": float(cfg.range_atr_up),
+        "min_net_grid_pct": float(cfg.min_net_grid_pct),
+        "trailing_slope_pct": float(cfg.slope_trailing_up_pct),
+        "trailing_up_steps": int(cfg.trailing_up_steps),
+        "tp_extra_grids": int(cfg.tp_extra_grids),
+        "sl_buffer_ticks": int(cfg.sl_buffer_ticks),
+        "max_bars": 30,
+    }
+
     if auto_optimize:
         try:
             work = df.set_index("timestamp") if "timestamp" in df.columns else df
@@ -755,8 +784,11 @@ def garantir_params_spot(par, timeframe, df, cfg, objective="mar", auto_optimize
                 commission_bps_per_side=cfg.fee_side_pct * 100.0,
                 slippage_ticks=0.0,
                 tick_size=float(tick_size or 0.01),
+                defaults=defaults,
             )
             payload = {
+                "schema_version": 2,
+                "optimizer_model": "LOW_SETUP_TRAILING_V1",
                 "symbol": par,
                 "interval": normalize_timeframe(timeframe),
                 "objective": objective,
@@ -765,19 +797,24 @@ def garantir_params_spot(par, timeframe, df, cfg, objective="mar", auto_optimize
                 "best_score": score,
                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
-            caminho_json(par, timeframe, objective).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            caminho_json(par, timeframe, objective).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             return {
-                "atr_period": int(best.get("atr_period", 14)),
-                "k_sl": float(best.get("k_sl", 1.5)),
-                "k_tp": float(best.get("k_tp", 2.5)),
-                "origem": "otimizado_spot",
+                **defaults,
+                **best,
+                "origem": "otimizado_grid_v2",
+                "generated_at": payload["generated_at"],
             }
         except Exception as exc:
             logging.warning("[OPT-SPOT] Falha otimizando %s %s: %s", par, timeframe, exc)
-    if params:
-        return params
-    return {"atr_period": 14, "k_sl": 1.5, "k_tp": 2.5, "origem": "padrao_spot"}
 
+    return {
+        **defaults,
+        "origem": "padrao_grid_v2",
+        "generated_at": None,
+    }
 
 def enviar_telegram(message: str, cfg: SpotContextConfig):
     if not cfg.enviar_telegram:
@@ -1031,19 +1068,19 @@ def run_scan(args):
                 atr=atr_m1,
                 slope_pct=slope,
                 fee_side_pct=cfg.fee_side_pct,
-                min_net_grid_pct=cfg.min_net_grid_pct,
+                min_net_grid_pct=params["min_net_grid_pct"],
                 range_atr_down=cfg.range_atr_down,
-                range_atr_up=cfg.range_atr_up,
+                range_atr_up=params["range_atr_up"],
                 sl_buffer_atr=cfg.sl_buffer_atr,
                 tp_buffer_atr=cfg.tp_buffer_atr,
                 min_grids=cfg.min_grids,
                 max_grids=cfg.max_grids,
-                trailing_slope_pct=cfg.slope_trailing_up_pct,
+                trailing_slope_pct=params["trailing_slope_pct"],
                 low_setup=low_setup,
                 tick_size=tick_size,
-                sl_buffer_ticks=cfg.sl_buffer_ticks,
-                trailing_up_steps=cfg.trailing_up_steps,
-                tp_extra_grids=cfg.tp_extra_grids,
+                sl_buffer_ticks=params["sl_buffer_ticks"],
+                trailing_up_steps=params["trailing_up_steps"],
+                tp_extra_grids=params["tp_extra_grids"],
             )
 
         if direction == "COMPRA" and low_setup is None:
@@ -1075,9 +1112,16 @@ def run_scan(args):
             "DIST_GATILHO_PCT": (current / trigger - 1) * 100 if trigger else np.nan,
             "ATR_PERIOD": params["atr_period"],
             "PARAM_ORIGEM": params["origem"],
+            "OPT_SCHEMA_VERSION": params.get("schema_version", 2),
+            "OPT_MODEL": params.get("optimizer_model", "LOW_SETUP_TRAILING_V1"),
             "ATR_M1": atr_m1,
-            "K_SL": params["k_sl"],
-            "K_TP": params["k_tp"],
+            "OPT_RANGE_ATR_UP": params["range_atr_up"],
+            "OPT_MIN_NET_GRID_PCT": params["min_net_grid_pct"],
+            "OPT_TRAILING_SLOPE_PCT": params["trailing_slope_pct"],
+            "OPT_TRAILING_UP_STEPS": params["trailing_up_steps"],
+            "OPT_TP_EXTRA_GRIDS": params["tp_extra_grids"],
+            "K_SL": np.nan,
+            "K_TP": np.nan,
             "SWING_ABS": swing_abs,
             "SWING_PCT": swing_pct,
             "SLOPE_MME9_PCT": slope,
