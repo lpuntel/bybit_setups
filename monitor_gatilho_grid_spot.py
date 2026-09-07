@@ -1,4 +1,4 @@
-# Monitor Spot Grid v2.6
+# Monitor Spot Grid v2.7
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -187,10 +187,13 @@ def hard_revalidation(par, cfg, ticker):
     return len(reasons) == 0, reasons, ctx
 
 
-def technical_revalidation(row, cfg):
+def technical_revalidation(row, cfg, current_price=None):
+    # Revalida sem exigir persistência do evento de setup em candles seguintes.
     par = str(row["Par"]).strip().upper()
     tf = normalize_timeframe(row["Timeframe"])
     expected_setup = str(row.get("Setup", "")).strip()
+    original_trigger = _float(row.get("GATILHO"))
+    decision = str(row.get("DECISAO_SPOT", "")).strip().upper()
 
     limit = min(
         1000,
@@ -217,25 +220,33 @@ def technical_revalidation(row, cfg):
     except Exception as exc:
         return False, [f"tecnico_erro:{type(exc).__name__}"], {}
 
-    if not signal:
-        return False, ["setup_ausente"], {}
+    if current_price is None:
+        current_price = _float(df.iloc[-1].get("close"))
+    else:
+        current_price = _float(current_price)
 
-    status = str(signal.get("status", "")).upper().strip()
-    direction = str(signal.get("tipo", "")).upper().strip()
-    parts = status.split()
-    setup_now = parts[2] if len(parts) >= 3 else ""
-    trigger_now = _float(signal.get("gatilho"))
+    status = ""
+    direction = ""
+    setup_now = ""
+    trigger_now = None
+
+    if signal:
+        status = str(signal.get("status", "")).upper().strip()
+        direction = str(signal.get("tipo", "")).upper().strip()
+        parts = status.split()
+        setup_now = parts[2] if len(parts) >= 3 else ""
+        trigger_now = _float(signal.get("gatilho"))
 
     reasons = []
+    warnings = []
 
-    if direction != "COMPRA":
-        reasons.append("sinal_nao_compra")
-
-    if setup_now != expected_setup:
-        reasons.append(f"setup_mudou:{expected_setup}->{setup_now or '?'}")
-
-    if not status.startswith("DISPARAR"):
-        reasons.append(f"status_atual:{status or '?'}")
+    if not signal:
+        warnings.append("sem_evento_setup_atual")
+    else:
+        if direction == "VENDA":
+            reasons.append(f"sinal_contrario:{status or 'VENDA'}")
+        elif direction == "COMPRA" and setup_now and setup_now != expected_setup:
+            reasons.append(f"setup_mudou:{expected_setup}->{setup_now}")
 
     last_closed = df.iloc[-2]
     atr_pct_real = _float(last_closed.get("ATR_PCT"))
@@ -244,6 +255,7 @@ def technical_revalidation(row, cfg):
     atr_period = int(_float(row.get("ATR_PERIOD"), 14) or 14)
     atr_series = legacy.compute_atr(df, period=atr_period, method="wilder")
     atr_m1 = _float(atr_series.iloc[-2])
+
     slope_now = _float(
         legacy.calcular_slope_mme9(
             df,
@@ -262,13 +274,57 @@ def technical_revalidation(row, cfg):
     if atr_m1 is None or atr_m1 <= 0:
         reasons.append("atr_absoluto_invalido")
 
-    if trigger_now is None or trigger_now <= 0:
-        reasons.append("gatilho_atual_invalido")
+    if original_trigger is None or original_trigger <= 0:
+        reasons.append("gatilho_original_invalido")
+
+    effective_trigger = original_trigger
+
+    if (
+        signal
+        and direction == "COMPRA"
+        and setup_now == expected_setup
+        and trigger_now is not None
+        and trigger_now > 0
+    ):
+        effective_trigger = trigger_now
+
+        if status.startswith("ARMAR") and current_price is not None:
+            if current_price < trigger_now:
+                if not (
+                    decision == "AGUARDAR_GATILHO"
+                    and original_trigger is not None
+                    and current_price < original_trigger
+                ):
+                    reasons.append("novo_gatilho_nao_atingido")
+
+    waiting_original = (
+        decision == "AGUARDAR_GATILHO"
+        and current_price is not None
+        and original_trigger is not None
+        and current_price < original_trigger
+    )
+
+    if not waiting_original:
+        if (
+            current_price is not None
+            and effective_trigger is not None
+            and current_price < effective_trigger
+        ):
+            reasons.append("preco_abaixo_gatilho_efetivo")
 
     grid_now = {}
-    if not reasons:
+
+    if waiting_original and not reasons:
+        technical_state = "AGUARDANDO_GATILHO"
+    elif not reasons:
+        technical_state = (
+            "VALIDADO_EVENTO_ATUAL"
+            if signal
+            else "VALIDADO_SEM_EVENTO_ATUAL"
+        )
+
         grid_now = spot_grid_parameters(
-            entry=trigger_now,
+            entry=effective_trigger,
             atr=atr_m1,
             slope_pct=slope_now or 0.0,
             fee_side_pct=cfg.fee_side_pct,
@@ -281,16 +337,23 @@ def technical_revalidation(row, cfg):
             max_grids=cfg.max_grids,
             trailing_slope_pct=cfg.slope_trailing_up_pct,
         )
+    else:
+        technical_state = "INVALIDADO"
 
     info = {
+        "technical_state": technical_state,
         "setup_atual": setup_now,
         "status_atual": status,
         "direcao_atual": direction,
-        "gatilho_atual": trigger_now,
+        "gatilho_original": original_trigger,
+        "gatilho_evento_atual": trigger_now,
+        "gatilho_atual": effective_trigger,
+        "preco_atual": current_price,
         "atr_pct_atual": atr_pct_real,
         "atr_m1_atual": atr_m1,
         "slope_atual": slope_now,
         "grid_atual": grid_now,
+        "warnings": warnings,
         "candle_fechado": str(last_closed.get("timestamp", "")),
     }
 
@@ -303,36 +366,57 @@ def technical_check_all(verbose=True):
 
     ok_count = 0
     blocked_count = 0
+    waiting_count = 0
 
-    print("=" * 90)
+    print("=" * 110)
     print("REVALIDAÇÃO TÉCNICA ATUAL")
-    print("=" * 90)
+    print("=" * 110)
 
     for _, row in candidates.iterrows():
-        ok, reasons, info = technical_revalidation(row, cfg)
+        par = str(row["Par"]).strip().upper()
+
+        try:
+            ticker = get_ticker(par)
+            current_price = _float(ticker.get("lastPrice"))
+        except Exception:
+            current_price = None
+
+        ok, reasons, info = technical_revalidation(
+            row,
+            cfg,
+            current_price=current_price,
+        )
+
+        state = info.get("technical_state", "INVALIDADO")
 
         if ok:
             ok_count += 1
-            status = "OK"
+            if state == "AGUARDANDO_GATILHO":
+                waiting_count += 1
+            status_txt = state
         else:
             blocked_count += 1
-            status = ";".join(reasons)
+            status_txt = ";".join(reasons)
+
+        warnings = ",".join(info.get("warnings", [])) or "-"
 
         if verbose:
             print(
                 f"{str(row['Par']):<14} "
                 f"{str(row['Timeframe']):>4} "
                 f"{str(row['Setup']):>4} | "
-                f"{status:<45} | "
-                f"setup_atual={info.get('setup_atual', '-')} "
-                f"atr={info.get('atr_pct_atual', '-')} "
-                f"grids={_fmt_int((info.get('grid_atual') or {}).get('GRIDS'))}"
+                f"{status_txt:<38} | "
+                f"evento={info.get('status_atual') or '-':<20} "
+                f"ATR={_fmt_pct_value(info.get('atr_pct_atual'), 2):>8} "
+                f"Grids={_fmt_int((info.get('grid_atual') or {}).get('GRIDS')):>3} "
+                f"Aviso={warnings}"
             )
 
-    print("-" * 90)
+    print("-" * 110)
     print(
         f"TOTAL={len(candidates)} | "
         f"TECNICO_OK={ok_count} | "
+        f"AGUARDANDO={waiting_count} | "
         f"TECNICO_BLOQUEADO={blocked_count}"
     )
 
@@ -501,6 +585,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         technical_ok, technical_reasons, technical_info = technical_revalidation(
             row,
             cfg,
+            current_price=last,
         )
         if not technical_ok:
             stats["bloqueados_tecnico"] += 1
@@ -560,7 +645,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.6")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.7")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
