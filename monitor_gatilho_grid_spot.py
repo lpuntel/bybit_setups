@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.0.1
+# Monitor Spot Grid v3.0.2
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -529,6 +529,7 @@ def prime_state(tolerance_pct=1.0):
         rec = {
             "prealert_sent": False,
             "ready_sent": False,
+            "overshoot_logged": False,
             "last_decision": decision,
         }
 
@@ -596,6 +597,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         rec = state.setdefault(key, {
             "prealert_sent": False,
             "ready_sent": False,
+            "overshoot_logged": False,
             "last_decision": decision,
         })
         rec["last_decision"] = decision
@@ -684,19 +686,32 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             gat,
         )
 
+        overshoot_active = False
         if effective_trigger and last > effective_trigger:
             overshoot_pct = (last / effective_trigger - 1.0) * 100.0
             if overshoot_pct > tolerance_pct:
+                overshoot_active = True
                 stats["gatilho_ultrapassado"] += 1
-                if verbose:
-                    print(
-                        f"[GATILHO ULTRAPASSADO] {par} {row['Timeframe']} "
-                        f"preço={_fmt_price(last)} "
-                        f"gatilho={_fmt_price(effective_trigger)} "
-                        f"dist={overshoot_pct:.3f}% "
-                        f"> limite={tolerance_pct:.3f}%"
-                    )
+
+                # Registra somente a transição para "ultrapassado".
+                if not rec.get("overshoot_logged", False):
+                    if verbose:
+                        print(
+                            f"[GATILHO ULTRAPASSADO] {par} {row['Timeframe']} "
+                            f"preço={_fmt_price(last)} "
+                            f"gatilho={_fmt_price(effective_trigger)} "
+                            f"dist={overshoot_pct:.3f}% "
+                            f"> limite={tolerance_pct:.3f}%"
+                        )
+                    rec["overshoot_logged"] = True
+                    changed = True
+
                 continue
+
+        # Se voltou para dentro da faixa, rearma o log.
+        if not overshoot_active and rec.get("overshoot_logged", False):
+            rec["overshoot_logged"] = False
+            changed = True
 
         grid = technical_info.get("grid_atual") or {}
         bybit_ok, bybit_reason = validar_parametros_bybit(
@@ -749,7 +764,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.0.1")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.0.2")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
