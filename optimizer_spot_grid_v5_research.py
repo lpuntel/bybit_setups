@@ -35,7 +35,7 @@ from optimizer_atr_sl_tp_spot import (
     _metrics,
 )
 
-RESEARCH_MODEL = "GRID_ACTIVATION_REVALIDATION_V5"
+RESEARCH_MODEL = "GRID_ACTIVATION_REVALIDATION_V5_0_1"
 BASE_GRID_MODEL = "GRID_INVENTORY_TRAILING_V4"
 
 ATR_PERIOD_GRID = [7, 10, 14, 21]
@@ -270,14 +270,22 @@ def prepare_activated_events(
     for e0 in raw_events:
         i = int(e0["armed_idx"])
 
-        effective_trigger = float(e0["trigger"])
-        effective_low = float(e0["low_setup"])
-        effective_candle_key = e0.get("setup_candle_key")
+        original_trigger = float(e0["trigger"])
+        original_low = float(e0["low_setup"])
+        original_candle_key = e0.get("setup_candle_key")
 
         end_wait = min(len(work) - 1, i + wait_bars)
         finished = False
 
         for j in range(i, end_wait + 1):
+            # O monitor real não persiste gatilho/LOW recalculados
+            # de uma checagem para a seguinte. Cada checagem começa
+            # novamente pelos valores originais da linha do scanner.
+            effective_trigger = original_trigger
+            effective_low = original_low
+            effective_candle_key = original_candle_key
+            trigger_updated_this_check = False
+
             sub = work.iloc[: j + 1].copy()
             sub["timestamp"] = sub.index
 
@@ -331,13 +339,13 @@ def prepare_activated_events(
                         )
 
                         if low_now is not None:
-                            if abs(
-                                trigger_now - effective_trigger
-                            ) > max(
-                                abs(effective_trigger) * 1e-10,
-                                1e-12,
-                            ):
-                                stats["GATILHO_ATUALIZADO"] += 1
+                            trigger_updated_this_check = (
+                                abs(trigger_now - original_trigger)
+                                > max(
+                                    abs(original_trigger) * 1e-10,
+                                    1e-12,
+                                )
+                            )
 
                             effective_trigger = trigger_now
                             effective_low = low_now
@@ -389,6 +397,11 @@ def prepare_activated_events(
 
             if not touched_band:
                 continue
+
+            # Conta atualização apenas quando ela participa
+            # efetivamente de uma ativação.
+            if trigger_updated_this_check:
+                stats["GATILHO_ATUALIZADO"] += 1
 
             # Filtro ATR no último candle fechado anterior à ativação.
             atr_idx = max(0, j - 1)
