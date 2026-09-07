@@ -1,4 +1,4 @@
-# Monitor Spot Grid v2.8
+# Monitor Spot Grid v2.9
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -519,6 +519,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         "grid": 0,
         "aguardando": 0,
         "prealertas": 0,
+        "prealertas_bloq_tecnico": 0,
         "prontos": 0,
         "bloqueados_revalidacao": 0,
         "bloqueados_tecnico": 0,
@@ -556,10 +557,27 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                 and dist_abs <= tolerance_pct
                 and not rec.get("prealert_sent", False)
             ):
-                if send(build_near_message(row, last, dist_abs), dry_run=dry_run):
-                    rec["prealert_sent"] = True
-                    stats["prealertas"] += 1
-                    changed = True
+                pre_ok, pre_reasons, pre_info = technical_revalidation(
+                    row,
+                    cfg,
+                    current_price=last,
+                )
+
+                if not pre_ok:
+                    stats["prealertas_bloq_tecnico"] += 1
+                    if verbose:
+                        print(
+                            f"[PRÉ-ALERTA TÉCNICO] {par} {row['Timeframe']} bloqueado: "
+                            + ";".join(pre_reasons)
+                        )
+                else:
+                    if send(
+                        build_near_message(row, last, dist_abs),
+                        dry_run=dry_run,
+                    ):
+                        rec["prealert_sent"] = True
+                        stats["prealertas"] += 1
+                        changed = True
 
             if last < gat or rec.get("ready_sent", False):
                 continue
@@ -639,6 +657,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             f"grid={stats['grid']} "
             f"aguardando={stats['aguardando']} "
             f"prealertas={stats['prealertas']} "
+            f"prealert_tecnico_bloq={stats['prealertas_bloq_tecnico']} "
             f"prontos={stats['prontos']} "
             f"revalidacao_bloq={stats['bloqueados_revalidacao']} "
             f"tecnico_bloq={stats['bloqueados_tecnico']} "
@@ -649,7 +668,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.8")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.9")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
