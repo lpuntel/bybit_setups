@@ -838,48 +838,100 @@ def validar_parametros_bybit(grid: dict, current_price: float, status: str) -> t
     return len(reasons) == 0, ";".join(reasons)
 
 def gerar_excel(resultados, universo, forca, cfg):
+    # Gera o Excel de forma atômica:
+    # escreve primeiro em .tmp.xlsx e só então substitui o arquivo oficial.
     out = pd.DataFrame(resultados)
-    with pd.ExcelWriter(ARQUIVO_SAIDA, engine="xlsxwriter") as writer:
-        out.to_excel(writer, sheet_name="Setups Spot", index=False)
-        if universo is not None and not universo.empty:
-            universo.to_excel(writer, sheet_name="UNIVERSO_SPOT", index=False)
-        if forca is not None and not forca.empty:
-            forca.to_excel(writer, sheet_name="FORCA_RELATIVA", index=False)
-        pd.DataFrame([{"Parametro": k, "Valor": v} for k, v in asdict(cfg).items()]).to_excel(
-            writer, sheet_name="CONFIG_CONTEXT", index=False
-        )
+    tmp_path = ARQUIVO_SAIDA.with_name(
+        ARQUIVO_SAIDA.stem + ".tmp" + ARQUIVO_SAIDA.suffix
+    )
 
-        wb = writer.book
-        header = wb.add_format({"bold": True, "bg_color": "#0F766E", "font_color": "#FFFFFF", "border": 1})
-        pct = wb.add_format({"num_format": "0.0000%"})
-        dec = wb.add_format({"num_format": "#,##0.00000000"})
-        num = wb.add_format({"num_format": "#,##0.00"})
-        for name, ws in writer.sheets.items():
-            if name == "CONFIG_CONTEXT":
-                ws.set_column(0, 0, 30); ws.set_column(1, 1, 22)
-                continue
-            df_sheet = out if name == "Setups Spot" else (universo if name == "UNIVERSO_SPOT" else forca)
-            if df_sheet is None:
-                continue
-            for c, col in enumerate(df_sheet.columns):
-                ws.write(0, c, col, header)
-                width = min(max(len(str(col)) + 2, 12), 28)
-                fmt = None
-                if col in {"SPREAD_PCT", "SLIPPAGE_EST_PCT", "ATR_PCT", "RET_3C", "RET_6C", "RET_12C"}:
-                    fmt = pct
-                elif col in {
-                    "GATILHO", "PRECO_ATUAL", "LOW_SETUP", "TICK_SIZE",
-                    "LOWER", "UPPER", "SL", "TP", "TRAILING_UP_LIMIT",
-                    "GRID_INTERVAL_PRICE", "ATR_M1"
-                }:
-                    fmt = dec
-                elif col in {"SCORE_TOTAL", "SCORE_LIQUIDEZ", "SCORE_REGIME", "SCORE_FORCA", "RANK_FORCA"}:
-                    fmt = num
-                ws.set_column(c, c, width, fmt)
-            ws.freeze_panes(1, 0)
-            if len(df_sheet.columns):
-                ws.autofilter(0, 0, max(1, len(df_sheet)), len(df_sheet.columns) - 1)
+    try:
+        with pd.ExcelWriter(tmp_path, engine="xlsxwriter") as writer:
+            out.to_excel(writer, sheet_name="Setups Spot", index=False)
 
+            if universo is not None and not universo.empty:
+                universo.to_excel(writer, sheet_name="UNIVERSO_SPOT", index=False)
+
+            if forca is not None and not forca.empty:
+                forca.to_excel(writer, sheet_name="FORCA_RELATIVA", index=False)
+
+            pd.DataFrame(
+                [{"Parametro": k, "Valor": v} for k, v in asdict(cfg).items()]
+            ).to_excel(writer, sheet_name="CONFIG_CONTEXT", index=False)
+
+            wb = writer.book
+            header = wb.add_format({
+                "bold": True,
+                "bg_color": "#0F766E",
+                "font_color": "#FFFFFF",
+                "border": 1,
+            })
+            pct = wb.add_format({"num_format": "0.0000%"})
+            dec = wb.add_format({"num_format": "#,##0.00000000"})
+            num = wb.add_format({"num_format": "#,##0.00"})
+
+            for name, ws in writer.sheets.items():
+                if name == "CONFIG_CONTEXT":
+                    ws.set_column(0, 0, 30)
+                    ws.set_column(1, 1, 22)
+                    continue
+
+                df_sheet = (
+                    out
+                    if name == "Setups Spot"
+                    else (
+                        universo
+                        if name == "UNIVERSO_SPOT"
+                        else forca
+                    )
+                )
+
+                if df_sheet is None:
+                    continue
+
+                for c, col in enumerate(df_sheet.columns):
+                    ws.write(0, c, col, header)
+                    width = min(max(len(str(col)) + 2, 12), 28)
+                    fmt = None
+
+                    if col in {
+                        "SPREAD_PCT", "SLIPPAGE_EST_PCT", "ATR_PCT",
+                        "RET_3C", "RET_6C", "RET_12C",
+                    }:
+                        fmt = pct
+                    elif col in {
+                        "GATILHO", "PRECO_ATUAL", "LOW_SETUP", "TICK_SIZE",
+                        "LOWER", "UPPER", "SL", "TP", "TRAILING_UP_LIMIT",
+                        "GRID_INTERVAL_PRICE", "ATR_M1",
+                    }:
+                        fmt = dec
+                    elif col in {
+                        "SCORE_TOTAL", "SCORE_LIQUIDEZ", "SCORE_REGIME",
+                        "SCORE_FORCA", "RANK_FORCA",
+                    }:
+                        fmt = num
+
+                    ws.set_column(c, c, width, fmt)
+
+                ws.freeze_panes(1, 0)
+
+                if len(df_sheet.columns):
+                    ws.autofilter(
+                        0,
+                        0,
+                        max(1, len(df_sheet)),
+                        len(df_sheet.columns) - 1,
+                    )
+
+        tmp_path.replace(ARQUIVO_SAIDA)
+
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise
 
 def run_scan(args):
     cfg = ler_config_spot()
