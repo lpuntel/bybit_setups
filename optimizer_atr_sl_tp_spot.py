@@ -1,18 +1,23 @@
 """
-Otimizador do modelo Spot Grid LOW_SETUP_TRAILING_V1.
+Otimizador Spot Grid v3 — simulador de ciclos do modelo LOW_SETUP_TRAILING_V1.
 
-Backtest/proxy de pesquisa. Não envia ordens.
-- não otimiza K_SL / K_TP;
-- LOW_SETUP permanece estrutural;
-- usa spot_grid_parameters();
-- avalia somente sinais de COMPRA;
-- otimiza parâmetros que realmente entram no modelo Spot Grid.
+Somente pesquisa/backtest. Não envia ordens.
 
-O resultado é um proxy de envelope (TP/SL + atividade potencial de grid),
-não uma reconstrução contábil perfeita do P&L do bot da exchange.
+O simulador trabalha com um proxy conservador de Spot Grid:
+- BUY quando o preço cruza um nível para baixo;
+- SELL quando volta a cruzar o nível imediatamente superior;
+- cada BUY/SELL concluído conta como um ciclo de grid;
+- custos são aplicados em cada execução;
+- posições abertas são marcadas a mercado no TP, SL ou timeout;
+- usa duas hipóteses intrabar (O-H-L-C e O-L-H-C) e conserva o pior resultado;
+- LOW_SETUP e SL por ticks continuam estruturais, não são otimizados.
+
+Não pretende reproduzir centavo a centavo a contabilidade interna do bot da exchange;
+serve para comparar configurações de grid de forma coerente entre si.
 """
 
 from __future__ import annotations
+
 import math
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -24,6 +29,7 @@ from legacy_futures import bybit_setups_script_hr_context as legacy
 
 GRID_OPT_SCHEMA_VERSION = 2
 GRID_OPT_MODEL = "LOW_SETUP_TRAILING_V1"
+GRID_BACKTEST_MODEL = "GRID_CYCLES_CONSERVATIVE_V3"
 
 SPOT_COMMISSION_BPS_PER_SIDE = 10.0
 SPOT_SLIPPAGE_TICKS = 0.5
@@ -175,6 +181,181 @@ def precompute_grid_events(
     return events
 
 
+def _build_levels(grid: Dict) -> List[float]:
+    lower = float(grid["LOWER"])
+    upper = float(grid["UPPER"])
+    interval = float(grid["GRID_INTERVAL_PRICE"])
+    if interval <= 0:
+        return []
+
+    cap = upper
+    if bool(grid.get("TRAILING_UP")) and grid.get("TRAILING_UP_LIMIT") is not None:
+        cap = float(grid["TRAILING_UP_LIMIT"])
+
+    n = max(1, int(round((cap - lower) / interval)))
+    levels = [lower + k * interval for k in range(n + 1)]
+
+    # Garante o cap como último nível, evitando erro acumulado de ponto flutuante.
+    if not levels or abs(levels[-1] - cap) > max(interval * 1e-6, 1e-12):
+        levels.append(cap)
+    else:
+        levels[-1] = cap
+
+    return levels
+
+
+def _crossed_down(a: float, b: float, level: float) -> bool:
+    return b <= level < a
+
+
+def _crossed_up(a: float, b: float, level: float) -> bool:
+    return a < level <= b
+
+
+def _simulate_path(
+    work: pd.DataFrame,
+    start: int,
+    end: int,
+    entry: float,
+    sl: float,
+    tp: float,
+    levels: List[float],
+    fee_rate: float,
+    slip: float,
+    path_mode: str,
+) -> Dict:
+    """
+    Um lote virtual por nível inferior.
+
+    Na queda:
+      cruza level[k] -> BUY em level[k]
+    Na alta:
+      cruza level[k+1] -> SELL do BUY aberto em level[k]
+
+    Isso contabiliza ciclos realizados e marca a mercado os BUYs que
+    permanecerem abertos quando a simulação termina.
+    """
+    open_buys: Dict[int, float] = {}
+    realized_quote = 0.0
+    cycles = 0
+    buy_fills = 0
+    sell_fills = 0
+    exit_reason = "TIME"
+    exit_price = float(work.iloc[end]["close"])
+
+    # Capital proxy: quote necessário para sustentar um lote em cada
+    # nível de compra abaixo da entrada.
+    reserve_levels = [
+        lv for k, lv in enumerate(levels[:-1])
+        if lv < entry
+    ]
+    capital_proxy = sum(reserve_levels)
+    if capital_proxy <= 0:
+        capital_proxy = entry
+
+    def do_buy(k: int):
+        nonlocal buy_fills
+        if k < 0 or k >= len(levels) - 1:
+            return
+        if k in open_buys:
+            return
+        px = float(levels[k]) + slip
+        open_buys[k] = px
+        buy_fills += 1
+
+    def do_sell(k: int):
+        nonlocal realized_quote, cycles, sell_fills
+        # SELL no nível k fecha o BUY do nível k-1.
+        buy_key = k - 1
+        if buy_key not in open_buys:
+            return
+        buy_px = open_buys.pop(buy_key)
+        sell_px = float(levels[k]) - slip
+        realized_quote += sell_px * (1.0 - fee_rate) - buy_px * (1.0 + fee_rate)
+        cycles += 1
+        sell_fills += 1
+
+    def close_open(mark: float):
+        nonlocal realized_quote, sell_fills
+        sell_px = max(0.0, float(mark) - slip)
+        for _, buy_px in list(open_buys.items()):
+            realized_quote += sell_px * (1.0 - fee_rate) - buy_px * (1.0 + fee_rate)
+            sell_fills += 1
+        open_buys.clear()
+
+    def walk_segment(a: float, b: float):
+        nonlocal exit_reason, exit_price
+        if b == a:
+            return False
+
+        if b < a:
+            # Se o SL está no caminho, processa somente até o SL.
+            target = max(b, sl) if a > sl >= b else b
+
+            for k in range(len(levels) - 2, -1, -1):
+                lv = levels[k]
+                if _crossed_down(a, target, lv):
+                    do_buy(k)
+
+            if a > sl >= b:
+                close_open(sl)
+                exit_reason = "SL"
+                exit_price = sl
+                return True
+
+        else:
+            # Se o TP está no caminho, processa somente até o TP.
+            target = min(b, tp) if a < tp <= b else b
+
+            for k in range(1, len(levels)):
+                lv = levels[k]
+                if _crossed_up(a, target, lv):
+                    do_sell(k)
+
+            if a < tp <= b:
+                close_open(tp)
+                exit_reason = "TP"
+                exit_price = tp
+                return True
+
+        return False
+
+    for j in range(start, end + 1):
+        bar = work.iloc[j]
+        o = float(bar["open"])
+        h = float(bar["high"])
+        l = float(bar["low"])
+        c = float(bar["close"])
+
+        if path_mode == "OHLC":
+            pts = [o, h, l, c]
+        else:
+            pts = [o, l, h, c]
+
+        for a, b in zip(pts[:-1], pts[1:]):
+            if walk_segment(a, b):
+                pnl_pct = realized_quote / capital_proxy * 100.0
+                return {
+                    "net_proxy_pct": pnl_pct,
+                    "exit_reason": exit_reason,
+                    "cycles": float(cycles),
+                    "buy_fills": float(buy_fills),
+                    "sell_fills": float(sell_fills),
+                    "capital_proxy": float(capital_proxy),
+                }
+
+    close_open(exit_price)
+    pnl_pct = realized_quote / capital_proxy * 100.0
+    return {
+        "net_proxy_pct": pnl_pct,
+        "exit_reason": exit_reason,
+        "cycles": float(cycles),
+        "buy_fills": float(buy_fills),
+        "sell_fills": float(sell_fills),
+        "capital_proxy": float(capital_proxy),
+    }
+
+
 def _simulate_one(
     work: pd.DataFrame,
     event: Dict,
@@ -214,11 +395,13 @@ def _simulate_one(
     if not grid:
         return None
 
+    levels = _build_levels(grid)
+    if len(levels) < 2:
+        return None
+
     entry = float(grid["ENTRY"])
     sl = float(grid["SL"])
     tp = float(grid["TP"])
-    lower = float(grid["LOWER"])
-    interval = float(grid["GRID_INTERVAL_PRICE"])
     max_bars = int(params.get("max_bars", DEFAULT_MAX_BARS))
 
     start = i + 1
@@ -226,48 +409,25 @@ def _simulate_one(
         return None
     end = min(len(work) - 1, i + max_bars)
 
-    exit_price = float(work.iloc[end]["close"])
-    exit_reason = "TIME"
-    activity = 0.0
+    fee_rate = float(fee_side_pct) / 100.0
+    slip = float(slippage_ticks) * float(tick_size)
 
-    for j in range(start, end + 1):
-        bar = work.iloc[j]
-        high = float(bar["high"])
-        low = float(bar["low"])
-
-        if interval > 0:
-            lo_clip = max(low, lower)
-            hi_clip = min(high, tp)
-            if hi_clip > lo_clip:
-                activity += max(0.0, (hi_clip - lo_clip) / interval)
-
-        hit_sl = low <= sl
-        hit_tp = high >= tp
-
-        # Pior caso se ambos ocorrerem no mesmo candle.
-        if hit_sl:
-            exit_price = sl
-            exit_reason = "SL"
-            break
-        if hit_tp:
-            exit_price = tp
-            exit_reason = "TP"
-            break
-
-    gross_pct = (exit_price / entry - 1.0) * 100.0
-    fee_pct = 2.0 * fee_side_pct
-    slip_pct = (
-        2.0 * float(slippage_ticks) * float(tick_size) / entry * 100.0
-        if entry > 0 else 0.0
+    a = _simulate_path(
+        work, start, end, entry, sl, tp, levels,
+        fee_rate, slip, "OHLC",
+    )
+    b = _simulate_path(
+        work, start, end, entry, sl, tp, levels,
+        fee_rate, slip, "OLHC",
     )
 
-    return {
-        "net_proxy_pct": gross_pct - fee_pct - slip_pct,
-        "exit_reason": exit_reason,
-        "grid_activity": activity,
-        "grids": float(grid.get("GRIDS") or 0),
-        "trailing_up": bool(grid.get("TRAILING_UP")),
-    }
+    # Conservador: usa a hipótese intrabar de menor resultado.
+    worst = a if a["net_proxy_pct"] <= b["net_proxy_pct"] else b
+    worst = dict(worst)
+    worst["grids"] = float(grid.get("GRIDS") or 0)
+    worst["trailing_up"] = bool(grid.get("TRAILING_UP"))
+    worst["path_model"] = "WORST_OF_OHLC_OLHC"
+    return worst
 
 
 def _metrics(results: List[Dict]) -> Dict[str, float]:
@@ -275,7 +435,9 @@ def _metrics(results: List[Dict]) -> Dict[str, float]:
         return {
             "trades": 0.0, "net": 0.0, "winrate": 0.0,
             "pf": 0.0, "sharpe": 0.0, "maxdd": 0.0,
-            "mar": 0.0, "expectancy": 0.0, "grid_activity": 0.0,
+            "mar": 0.0, "expectancy": 0.0,
+            "grid_cycles": 0.0, "cycles_per_trade": 0.0,
+            "buy_fills": 0.0, "sell_fills": 0.0,
             "tp_rate": 0.0, "sl_rate": 0.0,
         }
 
@@ -302,6 +464,10 @@ def _metrics(results: List[Dict]) -> Dict[str, float]:
     else:
         sharpe = 0.0
 
+    cycles = float(sum(r.get("cycles", 0.0) for r in results))
+    buy_fills = float(sum(r.get("buy_fills", 0.0) for r in results))
+    sell_fills = float(sum(r.get("sell_fills", 0.0) for r in results))
+
     return {
         "trades": float(len(results)),
         "net": _finite(net),
@@ -311,7 +477,10 @@ def _metrics(results: List[Dict]) -> Dict[str, float]:
         "maxdd": _finite(maxdd),
         "mar": _finite(mar),
         "expectancy": _finite(expectancy),
-        "grid_activity": _finite(np.mean([r["grid_activity"] for r in results])),
+        "grid_cycles": _finite(cycles),
+        "cycles_per_trade": _finite(cycles / len(results)),
+        "buy_fills": _finite(buy_fills),
+        "sell_fills": _finite(sell_fills),
         "tp_rate": _finite(np.mean([r["exit_reason"] == "TP" for r in results])),
         "sl_rate": _finite(np.mean([r["exit_reason"] == "SL" for r in results])),
     }
@@ -343,10 +512,11 @@ def _ranking(metrics: Dict[str, float], objective: str):
     trades = _finite(metrics.get("trades"), 0.0)
     reliability = min(1.0, trades / 5.0)
     adjusted = score * reliability if score >= 0 else score / max(reliability, 0.2)
+
     return (
         adjusted,
         _finite(metrics.get("expectancy"), -1e12),
-        _finite(metrics.get("grid_activity"), 0.0),
+        _finite(metrics.get("cycles_per_trade"), 0.0),
         trades,
     )
 
@@ -389,6 +559,7 @@ def run_optimization_with_setups(
     if not events:
         m = _metrics([])
         m["events_detected"] = 0.0
+        m["backtest_model"] = GRID_BACKTEST_MODEL
         return best, m
 
     def choose(candidates, current_best):
@@ -444,4 +615,5 @@ def run_optimization_with_setups(
     best_metrics["events_detected"] = float(len(events))
     best_metrics["evaluations"] = float(len(stage1) + len(stage2) + len(stage3))
     best_metrics["proxy_model"] = GRID_OPT_MODEL
+    best_metrics["backtest_model"] = GRID_BACKTEST_MODEL
     return best, best_metrics
