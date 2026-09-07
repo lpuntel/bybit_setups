@@ -1,4 +1,4 @@
-# Monitor Spot Grid v2.7
+# Monitor Spot Grid v2.8
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -297,14 +297,17 @@ def technical_revalidation(row, cfg, current_price=None):
                 ):
                     reasons.append("novo_gatilho_nao_atingido")
 
-    waiting_original = (
+    # Se existe um evento atual do MESMO setup, o gatilho atual passa a
+    # prevalecer sobre o gatilho que estava na planilha do scan.
+    # Isso evita manter AGUARDANDO quando o setup atual já está DISPARAR.
+    waiting_effective = (
         decision == "AGUARDAR_GATILHO"
         and current_price is not None
-        and original_trigger is not None
-        and current_price < original_trigger
+        and effective_trigger is not None
+        and current_price < effective_trigger
     )
 
-    if not waiting_original:
+    if not waiting_effective:
         if (
             current_price is not None
             and effective_trigger is not None
@@ -314,7 +317,7 @@ def technical_revalidation(row, cfg, current_price=None):
 
     grid_now = {}
 
-    if waiting_original and not reasons:
+    if waiting_effective and not reasons:
         technical_state = "AGUARDANDO_GATILHO"
     elif not reasons:
         technical_state = (
@@ -408,6 +411,7 @@ def technical_check_all(verbose=True):
                 f"{status_txt:<38} | "
                 f"evento={info.get('status_atual') or '-':<20} "
                 f"ATR={_fmt_pct_value(info.get('atr_pct_atual'), 2):>8} "
+                f"Gat={_fmt_price(info.get('gatilho_atual')):>12} "
                 f"Grids={_fmt_int((info.get('grid_atual') or {}).get('GRIDS')):>3} "
                 f"Aviso={warnings}"
             )
@@ -645,7 +649,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.7")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.8")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
