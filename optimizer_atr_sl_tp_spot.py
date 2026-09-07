@@ -1,19 +1,24 @@
 """
-Otimizador Spot Grid v3 — simulador de ciclos do modelo LOW_SETUP_TRAILING_V1.
+Otimizador Spot Grid v4 — simulador de inventário e ciclos do modelo
+LOW_SETUP_TRAILING_V1.
 
 Somente pesquisa/backtest. Não envia ordens.
 
-O simulador trabalha com um proxy conservador de Spot Grid:
-- BUY quando o preço cruza um nível para baixo;
-- SELL quando volta a cruzar o nível imediatamente superior;
-- cada BUY/SELL concluído conta como um ciclo de grid;
-- custos são aplicados em cada execução;
-- posições abertas são marcadas a mercado no TP, SL ou timeout;
-- usa duas hipóteses intrabar (O-H-L-C e O-L-H-C) e conserva o pior resultado;
-- LOW_SETUP e SL por ticks continuam estruturais, não são otimizados.
+Modelo:
+- cada intervalo do grid é tratado como uma célula;
+- células abaixo/atravessando a entrada começam esperando BUY no limite inferior;
+- células totalmente acima da entrada começam com estoque inicial de base,
+  comprado ao preço de entrada, esperando SELL no limite superior;
+- BUY->SELL concluído conta como ciclo de grid;
+- SELL do estoque inicial é contabilizado separadamente no P&L;
+- fees e slippage são aplicados por execução;
+- posições abertas são marcadas a mercado no SL, TP ou timeout;
+- Trailing Up desloca a faixa um grid por vez quando o preço cruza
+  upper + intervalo, adicionando nova compra no upper anterior;
+- usa o pior resultado entre duas hipóteses intrabar: O-H-L-C e O-L-H-C.
 
-Não pretende reproduzir centavo a centavo a contabilidade interna do bot da exchange;
-serve para comparar configurações de grid de forma coerente entre si.
+É um simulador comparativo conservador, não uma réplica contábil centavo a centavo
+do motor interno da exchange.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from legacy_futures import bybit_setups_script_hr_context as legacy
 
 GRID_OPT_SCHEMA_VERSION = 2
 GRID_OPT_MODEL = "LOW_SETUP_TRAILING_V1"
-GRID_BACKTEST_MODEL = "GRID_CYCLES_CONSERVATIVE_V3"
+GRID_BACKTEST_MODEL = "GRID_INVENTORY_TRAILING_V4"
 
 SPOT_COMMISSION_BPS_PER_SIDE = 10.0
 SPOT_SLIPPAGE_TICKS = 0.5
@@ -118,6 +123,7 @@ def precompute_grid_events(
                 out = _call_setup(fn, sub)
             except Exception:
                 continue
+
             if not isinstance(out, dict):
                 continue
             if str(out.get("tipo", "")).strip().upper() != "COMPRA":
@@ -181,27 +187,66 @@ def precompute_grid_events(
     return events
 
 
-def _build_levels(grid: Dict) -> List[float]:
+def _initial_levels(grid: Dict) -> List[float]:
     lower = float(grid["LOWER"])
     upper = float(grid["UPPER"])
     interval = float(grid["GRID_INTERVAL_PRICE"])
-    if interval <= 0:
+    grids = int(grid["GRIDS"])
+
+    if interval <= 0 or grids < 1:
         return []
 
-    cap = upper
-    if bool(grid.get("TRAILING_UP")) and grid.get("TRAILING_UP_LIMIT") is not None:
-        cap = float(grid["TRAILING_UP_LIMIT"])
-
-    n = max(1, int(round((cap - lower) / interval)))
-    levels = [lower + k * interval for k in range(n + 1)]
-
-    # Garante o cap como último nível, evitando erro acumulado de ponto flutuante.
-    if not levels or abs(levels[-1] - cap) > max(interval * 1e-6, 1e-12):
-        levels.append(cap)
-    else:
-        levels[-1] = cap
-
+    levels = [lower + k * interval for k in range(grids + 1)]
+    levels[0] = lower
+    levels[-1] = upper
     return levels
+
+
+def _make_initial_cells(
+    levels: List[float],
+    entry: float,
+    fee_rate: float,
+    slip: float,
+):
+    """
+    Uma célula por intervalo [lower, upper].
+
+    Se lower <= entry:
+      ordem inicial = BUY em lower.
+
+    Se lower > entry:
+      o bot precisa de base inicial para sustentar SELL em upper.
+      Esse lote recebe custo-base de compra a mercado na entrada.
+    """
+    cells = []
+    initial_inventory = 0
+
+    entry_exec = entry + slip
+    entry_cost = entry_exec * (1.0 + fee_rate)
+
+    for k in range(len(levels) - 1):
+        lo = float(levels[k])
+        hi = float(levels[k + 1])
+
+        if lo <= entry:
+            cells.append({
+                "lower": lo,
+                "upper": hi,
+                "state": "WAIT_BUY",
+                "cost_quote": None,
+                "origin": None,
+            })
+        else:
+            cells.append({
+                "lower": lo,
+                "upper": hi,
+                "state": "WAIT_SELL",
+                "cost_quote": entry_cost,
+                "origin": "INITIAL",
+            })
+            initial_inventory += 1
+
+    return cells, initial_inventory
 
 
 def _crossed_down(a: float, b: float, level: float) -> bool:
@@ -216,86 +261,170 @@ def _simulate_path(
     work: pd.DataFrame,
     start: int,
     end: int,
-    entry: float,
-    sl: float,
-    tp: float,
-    levels: List[float],
+    grid: Dict,
     fee_rate: float,
     slip: float,
     path_mode: str,
 ) -> Dict:
-    """
-    Um lote virtual por nível inferior.
+    entry = float(grid["ENTRY"])
+    sl = float(grid["SL"])
+    tp = float(grid["TP"])
+    interval = float(grid["GRID_INTERVAL_PRICE"])
 
-    Na queda:
-      cruza level[k] -> BUY em level[k]
-    Na alta:
-      cruza level[k+1] -> SELL do BUY aberto em level[k]
+    levels = _initial_levels(grid)
+    if len(levels) < 2:
+        return {
+            "net_proxy_pct": 0.0,
+            "exit_reason": "INVALID",
+            "cycles": 0.0,
+            "initial_inventory_sells": 0.0,
+            "buy_fills": 0.0,
+            "sell_fills": 0.0,
+            "trailing_shifts": 0.0,
+            "capital_proxy": 0.0,
+        }
 
-    Isso contabiliza ciclos realizados e marca a mercado os BUYs que
-    permanecerem abertos quando a simulação termina.
-    """
-    open_buys: Dict[int, float] = {}
-    realized_quote = 0.0
-    cycles = 0
-    buy_fills = 0
-    sell_fills = 0
-    exit_reason = "TIME"
-    exit_price = float(work.iloc[end]["close"])
+    cells, initial_inventory = _make_initial_cells(
+        levels, entry, fee_rate, slip
+    )
 
-    # Capital proxy: quote necessário para sustentar um lote em cada
-    # nível de compra abaixo da entrada.
-    reserve_levels = [
-        lv for k, lv in enumerate(levels[:-1])
-        if lv < entry
-    ]
-    capital_proxy = sum(reserve_levels)
+    # Capital inicial proxy:
+    # 1) quote reservado nas compras iniciais;
+    # 2) custo do estoque inicial de base necessário às vendas superiores.
+    capital_proxy = 0.0
+    for cell in cells:
+        if cell["state"] == "WAIT_BUY":
+            capital_proxy += cell["lower"] * (1.0 + fee_rate)
+        else:
+            capital_proxy += float(cell["cost_quote"])
+
     if capital_proxy <= 0:
         capital_proxy = entry
 
-    def do_buy(k: int):
+    realized_quote = 0.0
+    cycles = 0
+    initial_inventory_sells = 0
+    buy_fills = 0
+    sell_fills = 0
+    trailing_shifts = 0
+
+    trailing_enabled = bool(grid.get("TRAILING_UP"))
+    max_trailing_steps = int(grid.get("TRAILING_UP_STEPS") or 0)
+    current_lower = float(levels[0])
+    current_upper = float(levels[-1])
+
+    exit_reason = "TIME"
+    exit_price = float(work.iloc[end]["close"])
+
+    def sort_cells():
+        cells.sort(key=lambda c: (c["lower"], c["upper"]))
+
+    def do_buy(cell):
         nonlocal buy_fills
-        if k < 0 or k >= len(levels) - 1:
+        if cell["state"] != "WAIT_BUY":
             return
-        if k in open_buys:
-            return
-        px = float(levels[k]) + slip
-        open_buys[k] = px
+        buy_exec = float(cell["lower"]) + slip
+        cell["cost_quote"] = buy_exec * (1.0 + fee_rate)
+        cell["state"] = "WAIT_SELL"
+        cell["origin"] = "GRID"
         buy_fills += 1
 
-    def do_sell(k: int):
-        nonlocal realized_quote, cycles, sell_fills
-        # SELL no nível k fecha o BUY do nível k-1.
-        buy_key = k - 1
-        if buy_key not in open_buys:
+    def do_sell(cell):
+        nonlocal realized_quote, cycles, initial_inventory_sells, sell_fills
+        if cell["state"] != "WAIT_SELL":
             return
-        buy_px = open_buys.pop(buy_key)
-        sell_px = float(levels[k]) - slip
-        realized_quote += sell_px * (1.0 - fee_rate) - buy_px * (1.0 + fee_rate)
-        cycles += 1
-        sell_fills += 1
 
-    def close_open(mark: float):
+        sell_exec = max(0.0, float(cell["upper"]) - slip)
+        proceeds = sell_exec * (1.0 - fee_rate)
+        cost = float(cell["cost_quote"] or 0.0)
+        realized_quote += proceeds - cost
+
+        if cell.get("origin") == "GRID":
+            cycles += 1
+        elif cell.get("origin") == "INITIAL":
+            initial_inventory_sells += 1
+
+        sell_fills += 1
+        cell["state"] = "WAIT_BUY"
+        cell["cost_quote"] = None
+        cell["origin"] = None
+
+    def close_open(mark):
         nonlocal realized_quote, sell_fills
-        sell_px = max(0.0, float(mark) - slip)
-        for _, buy_px in list(open_buys.items()):
-            realized_quote += sell_px * (1.0 - fee_rate) - buy_px * (1.0 + fee_rate)
-            sell_fills += 1
-        open_buys.clear()
+        sell_exec = max(0.0, float(mark) - slip)
+        proceeds = sell_exec * (1.0 - fee_rate)
+
+        for cell in cells:
+            if cell["state"] == "WAIT_SELL":
+                cost = float(cell["cost_quote"] or 0.0)
+                realized_quote += proceeds - cost
+                sell_fills += 1
+                cell["state"] = "WAIT_BUY"
+                cell["cost_quote"] = None
+                cell["origin"] = None
+
+    def shift_up_once():
+        """
+        Proxy do Trailing Up da Bybit:
+        - cancela a compra mais baixa disponível;
+        - desloca a faixa um intervalo;
+        - cria nova célula superior esperando BUY no antigo upper.
+        """
+        nonlocal current_lower, current_upper, trailing_shifts
+
+        buy_cells = [
+            c for c in cells
+            if c["state"] == "WAIT_BUY"
+        ]
+        if not buy_cells:
+            return False
+
+        lowest_buy = min(buy_cells, key=lambda c: c["lower"])
+        cells.remove(lowest_buy)
+
+        old_upper = current_upper
+        new_upper = old_upper + interval
+
+        cells.append({
+            "lower": old_upper,
+            "upper": new_upper,
+            "state": "WAIT_BUY",
+            "cost_quote": None,
+            "origin": None,
+        })
+
+        current_lower += interval
+        current_upper = new_upper
+        trailing_shifts += 1
+        sort_cells()
+        return True
+
+    def maybe_shift_up(a, b):
+        if not trailing_enabled or b <= a:
+            return
+
+        while trailing_shifts < max_trailing_steps:
+            trigger = current_upper + interval
+            if not (a < trigger <= b):
+                break
+            if not shift_up_once():
+                break
 
     def walk_segment(a: float, b: float):
         nonlocal exit_reason, exit_price
+
         if b == a:
             return False
 
         if b < a:
-            # Se o SL está no caminho, processa somente até o SL.
             target = max(b, sl) if a > sl >= b else b
 
-            for k in range(len(levels) - 2, -1, -1):
-                lv = levels[k]
-                if _crossed_down(a, target, lv):
-                    do_buy(k)
+            # Ao cair, BUYs são executados do maior nível para o menor.
+            for cell in sorted(cells, key=lambda c: c["lower"], reverse=True):
+                if cell["state"] == "WAIT_BUY" and _crossed_down(
+                    a, target, float(cell["lower"])
+                ):
+                    do_buy(cell)
 
             if a > sl >= b:
                 close_open(sl)
@@ -304,13 +433,17 @@ def _simulate_path(
                 return True
 
         else:
-            # Se o TP está no caminho, processa somente até o TP.
             target = min(b, tp) if a < tp <= b else b
 
-            for k in range(1, len(levels)):
-                lv = levels[k]
-                if _crossed_up(a, target, lv):
-                    do_sell(k)
+            # Ao subir, SELLs são executados do menor nível para o maior.
+            for cell in sorted(cells, key=lambda c: c["upper"]):
+                if cell["state"] == "WAIT_SELL" and _crossed_up(
+                    a, target, float(cell["upper"])
+                ):
+                    do_sell(cell)
+
+            # Trailing Up ocorre ao atingir upper + 1 intervalo.
+            maybe_shift_up(a, target)
 
             if a < tp <= b:
                 close_open(tp)
@@ -327,31 +460,33 @@ def _simulate_path(
         l = float(bar["low"])
         c = float(bar["close"])
 
-        if path_mode == "OHLC":
-            pts = [o, h, l, c]
-        else:
-            pts = [o, l, h, c]
+        pts = [o, h, l, c] if path_mode == "OHLC" else [o, l, h, c]
 
         for a, b in zip(pts[:-1], pts[1:]):
             if walk_segment(a, b):
-                pnl_pct = realized_quote / capital_proxy * 100.0
                 return {
-                    "net_proxy_pct": pnl_pct,
+                    "net_proxy_pct": realized_quote / capital_proxy * 100.0,
                     "exit_reason": exit_reason,
                     "cycles": float(cycles),
+                    "initial_inventory_sells": float(initial_inventory_sells),
+                    "initial_inventory_lots": float(initial_inventory),
                     "buy_fills": float(buy_fills),
                     "sell_fills": float(sell_fills),
+                    "trailing_shifts": float(trailing_shifts),
                     "capital_proxy": float(capital_proxy),
                 }
 
     close_open(exit_price)
-    pnl_pct = realized_quote / capital_proxy * 100.0
+
     return {
-        "net_proxy_pct": pnl_pct,
+        "net_proxy_pct": realized_quote / capital_proxy * 100.0,
         "exit_reason": exit_reason,
         "cycles": float(cycles),
+        "initial_inventory_sells": float(initial_inventory_sells),
+        "initial_inventory_lots": float(initial_inventory),
         "buy_fills": float(buy_fills),
         "sell_fills": float(sell_fills),
+        "trailing_shifts": float(trailing_shifts),
         "capital_proxy": float(capital_proxy),
     }
 
@@ -372,6 +507,7 @@ def _simulate_one(
         atr = float(atr_series.iloc[atr_idx])
     except Exception:
         return None
+
     if not math.isfinite(atr) or atr <= 0:
         return None
 
@@ -392,18 +528,11 @@ def _simulate_one(
         trailing_up_steps=int(params["trailing_up_steps"]),
         tp_extra_grids=int(params["tp_extra_grids"]),
     )
+
     if not grid:
         return None
 
-    levels = _build_levels(grid)
-    if len(levels) < 2:
-        return None
-
-    entry = float(grid["ENTRY"])
-    sl = float(grid["SL"])
-    tp = float(grid["TP"])
     max_bars = int(params.get("max_bars", DEFAULT_MAX_BARS))
-
     start = i + 1
     if start >= len(work):
         return None
@@ -413,15 +542,12 @@ def _simulate_one(
     slip = float(slippage_ticks) * float(tick_size)
 
     a = _simulate_path(
-        work, start, end, entry, sl, tp, levels,
-        fee_rate, slip, "OHLC",
+        work, start, end, grid, fee_rate, slip, "OHLC"
     )
     b = _simulate_path(
-        work, start, end, entry, sl, tp, levels,
-        fee_rate, slip, "OLHC",
+        work, start, end, grid, fee_rate, slip, "OLHC"
     )
 
-    # Conservador: usa a hipótese intrabar de menor resultado.
     worst = a if a["net_proxy_pct"] <= b["net_proxy_pct"] else b
     worst = dict(worst)
     worst["grids"] = float(grid.get("GRIDS") or 0)
@@ -433,12 +559,23 @@ def _simulate_one(
 def _metrics(results: List[Dict]) -> Dict[str, float]:
     if not results:
         return {
-            "trades": 0.0, "net": 0.0, "winrate": 0.0,
-            "pf": 0.0, "sharpe": 0.0, "maxdd": 0.0,
-            "mar": 0.0, "expectancy": 0.0,
-            "grid_cycles": 0.0, "cycles_per_trade": 0.0,
-            "buy_fills": 0.0, "sell_fills": 0.0,
-            "tp_rate": 0.0, "sl_rate": 0.0,
+            "trades": 0.0,
+            "net": 0.0,
+            "winrate": 0.0,
+            "pf": 0.0,
+            "sharpe": 0.0,
+            "maxdd": 0.0,
+            "mar": 0.0,
+            "expectancy": 0.0,
+            "grid_cycles": 0.0,
+            "cycles_per_trade": 0.0,
+            "initial_inventory_sells": 0.0,
+            "initial_inventory_lots": 0.0,
+            "buy_fills": 0.0,
+            "sell_fills": 0.0,
+            "trailing_shifts": 0.0,
+            "tp_rate": 0.0,
+            "sl_rate": 0.0,
         }
 
     pnls = np.array([r["net_proxy_pct"] for r in results], dtype=float)
@@ -448,25 +585,42 @@ def _metrics(results: List[Dict]) -> Dict[str, float]:
     net = float(pnls.sum())
     expectancy = float(pnls.mean())
     winrate = float((pnls > 0).mean())
+
     gross_win = float(wins.sum()) if len(wins) else 0.0
     gross_loss = abs(float(losses.sum())) if len(losses) else 0.0
-    pf = gross_win / gross_loss if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
+    pf = gross_win / gross_loss if gross_loss > 0 else (
+        99.0 if gross_win > 0 else 0.0
+    )
 
     eq = pnls.cumsum()
     peak = np.maximum.accumulate(np.insert(eq, 0, 0.0))[1:]
     dd = eq - peak
     maxdd = float(dd.min()) if len(dd) else 0.0
-    mar = net / abs(maxdd) if maxdd < 0 else (99.0 if net > 0 else 0.0)
+    mar = net / abs(maxdd) if maxdd < 0 else (
+        99.0 if net > 0 else 0.0
+    )
 
     if len(pnls) >= 2:
         sd = float(pnls.std(ddof=1))
-        sharpe = float(pnls.mean() / sd * math.sqrt(len(pnls))) if sd > 0 else 0.0
+        sharpe = (
+            float(pnls.mean() / sd * math.sqrt(len(pnls)))
+            if sd > 0 else 0.0
+        )
     else:
         sharpe = 0.0
 
     cycles = float(sum(r.get("cycles", 0.0) for r in results))
+    init_sells = float(
+        sum(r.get("initial_inventory_sells", 0.0) for r in results)
+    )
+    init_lots = float(
+        sum(r.get("initial_inventory_lots", 0.0) for r in results)
+    )
     buy_fills = float(sum(r.get("buy_fills", 0.0) for r in results))
     sell_fills = float(sum(r.get("sell_fills", 0.0) for r in results))
+    trailing_shifts = float(
+        sum(r.get("trailing_shifts", 0.0) for r in results)
+    )
 
     return {
         "trades": float(len(results)),
@@ -479,10 +633,17 @@ def _metrics(results: List[Dict]) -> Dict[str, float]:
         "expectancy": _finite(expectancy),
         "grid_cycles": _finite(cycles),
         "cycles_per_trade": _finite(cycles / len(results)),
+        "initial_inventory_sells": _finite(init_sells),
+        "initial_inventory_lots": _finite(init_lots),
         "buy_fills": _finite(buy_fills),
         "sell_fills": _finite(sell_fills),
-        "tp_rate": _finite(np.mean([r["exit_reason"] == "TP" for r in results])),
-        "sl_rate": _finite(np.mean([r["exit_reason"] == "SL" for r in results])),
+        "trailing_shifts": _finite(trailing_shifts),
+        "tp_rate": _finite(
+            np.mean([r["exit_reason"] == "TP" for r in results])
+        ),
+        "sl_rate": _finite(
+            np.mean([r["exit_reason"] == "SL" for r in results])
+        ),
     }
 
 
@@ -496,22 +657,34 @@ def _evaluate_params(
 ) -> Dict[str, float]:
     atr_series = _compute_atr(work, int(params["atr_period"]))
     fee_side_pct = float(commission_bps_per_side) / 100.0
+
     results = []
     for event in events:
         r = _simulate_one(
-            work, event, atr_series, params, fee_side_pct,
-            slippage_ticks, tick_size,
+            work,
+            event,
+            atr_series,
+            params,
+            fee_side_pct,
+            slippage_ticks,
+            tick_size,
         )
         if r is not None:
             results.append(r)
+
     return _metrics(results)
 
 
 def _ranking(metrics: Dict[str, float], objective: str):
     score = _finite(metrics.get(objective), -1e12)
     trades = _finite(metrics.get("trades"), 0.0)
+
     reliability = min(1.0, trades / 5.0)
-    adjusted = score * reliability if score >= 0 else score / max(reliability, 0.2)
+    adjusted = (
+        score * reliability
+        if score >= 0
+        else score / max(reliability, 0.2)
+    )
 
     return (
         adjusted,
@@ -538,24 +711,36 @@ def run_optimization_with_setups(
     if not isinstance(work.index, pd.DatetimeIndex):
         if "timestamp" not in work.columns:
             raise ValueError("DataFrame precisa de timestamp ou DatetimeIndex.")
-        work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True)
+        work["timestamp"] = pd.to_datetime(
+            work["timestamp"], utc=True
+        )
         work = work.set_index("timestamp")
 
     defaults = dict(defaults or {})
+
     best = {
         "schema_version": GRID_OPT_SCHEMA_VERSION,
         "optimizer_model": GRID_OPT_MODEL,
         "atr_period": int(defaults.get("atr_period", 14)),
         "range_atr_up": float(defaults.get("range_atr_up", 3.0)),
-        "min_net_grid_pct": float(defaults.get("min_net_grid_pct", 0.15)),
-        "trailing_slope_pct": float(defaults.get("trailing_slope_pct", 0.75)),
-        "trailing_up_steps": int(defaults.get("trailing_up_steps", 3)),
+        "min_net_grid_pct": float(
+            defaults.get("min_net_grid_pct", 0.15)
+        ),
+        "trailing_slope_pct": float(
+            defaults.get("trailing_slope_pct", 0.75)
+        ),
+        "trailing_up_steps": int(
+            defaults.get("trailing_up_steps", 3)
+        ),
         "tp_extra_grids": int(defaults.get("tp_extra_grids", 1)),
         "sl_buffer_ticks": int(defaults.get("sl_buffer_ticks", 2)),
-        "max_bars": int(defaults.get("max_bars", DEFAULT_MAX_BARS)),
+        "max_bars": int(
+            defaults.get("max_bars", DEFAULT_MAX_BARS)
+        ),
     }
 
     events = precompute_grid_events(work, setup_funcs)
+
     if not events:
         m = _metrics([])
         m["events_detected"] = 0.0
@@ -564,22 +749,33 @@ def run_optimization_with_setups(
 
     def choose(candidates, current_best):
         winner = dict(current_best)
+
         winner_metrics = _evaluate_params(
-            work, events, winner,
-            commission_bps_per_side, slippage_ticks, tick_size,
+            work,
+            events,
+            winner,
+            commission_bps_per_side,
+            slippage_ticks,
+            tick_size,
         )
         winner_rank = _ranking(winner_metrics, objective)
 
         for cand in candidates:
             m = _evaluate_params(
-                work, events, cand,
-                commission_bps_per_side, slippage_ticks, tick_size,
+                work,
+                events,
+                cand,
+                commission_bps_per_side,
+                slippage_ticks,
+                tick_size,
             )
             rank = _ranking(m, objective)
+
             if rank > winner_rank:
                 winner = dict(cand)
                 winner_metrics = m
                 winner_rank = rank
+
         return winner, winner_metrics
 
     stage1 = []
@@ -589,6 +785,7 @@ def run_optimization_with_setups(
             c["atr_period"] = atr_period
             c["range_atr_up"] = range_up
             stage1.append(c)
+
     best, best_metrics = choose(stage1, best)
 
     stage2 = []
@@ -596,6 +793,7 @@ def run_optimization_with_setups(
         c = dict(best)
         c["min_net_grid_pct"] = min_net
         stage2.append(c)
+
     best, best_metrics = choose(stage2, best)
 
     stage3 = []
@@ -607,13 +805,22 @@ def run_optimization_with_setups(
                 c["trailing_up_steps"] = steps
                 c["tp_extra_grids"] = extra
                 stage3.append(c)
+
     best, best_metrics = choose(stage3, best)
 
     best["schema_version"] = GRID_OPT_SCHEMA_VERSION
     best["optimizer_model"] = GRID_OPT_MODEL
-    best_metrics = {k: _finite(v) for k, v in best_metrics.items()}
+
+    best_metrics = {
+        k: _finite(v)
+        for k, v in best_metrics.items()
+    }
+
     best_metrics["events_detected"] = float(len(events))
-    best_metrics["evaluations"] = float(len(stage1) + len(stage2) + len(stage3))
+    best_metrics["evaluations"] = float(
+        len(stage1) + len(stage2) + len(stage3)
+    )
     best_metrics["proxy_model"] = GRID_OPT_MODEL
     best_metrics["backtest_model"] = GRID_BACKTEST_MODEL
+
     return best, best_metrics
