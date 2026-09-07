@@ -118,6 +118,9 @@ class SpotContextConfig:
     min_grids: int = 2
     max_grids: int = 200
     slope_trailing_up_pct: float = 0.75
+    sl_buffer_ticks: int = 2
+    trailing_up_steps: int = 3
+    tp_extra_grids: int = 1
 
     # Rotina
     api_sleep_s: float = 0.08
@@ -226,6 +229,9 @@ ALIASES = {
     "MAX_GRIDS": "max_grids",
     "SLOPE_TRAILING_UP": "slope_trailing_up_pct",
     "SLOPE_MIN_TRAILING": "slope_trailing_up_pct",
+    "SL_BUFFER_TICKS": "sl_buffer_ticks",
+    "TRAILING_UP_STEPS": "trailing_up_steps",
+    "TP_EXTRA_GRIDS": "tp_extra_grids",
     "ENVIAR_TELEGRAM": "enviar_telegram",
     "UPLOAD_DRIVE": "upload_drive",
 }
@@ -665,6 +671,43 @@ def escolher_setup_spot(df, symbol):
     return sorted(found, key=priority)[0]
 
 
+
+def localizar_candle_setup_compra(df, trigger):
+    # Os setups de compra devolvem como gatilho a máxima do candle definidor.
+    # Havendo repetição da mesma máxima, escolhe a ocorrência mais recente.
+    if df is None or df.empty or trigger is None:
+        return None, None
+
+    try:
+        trigger = float(trigger)
+    except Exception:
+        return None, None
+
+    fechados = df.iloc[:-1].copy()
+    if fechados.empty:
+        return None, None
+
+    tol = max(abs(trigger) * 1e-10, 1e-12)
+    diff = (pd.to_numeric(fechados["high"], errors="coerce") - trigger).abs()
+    matches = fechados.loc[diff <= tol]
+
+    if matches.empty:
+        return None, None
+
+    candle = matches.iloc[-1]
+    low_setup = _to_float(candle.get("low"))
+    ts = candle.get("timestamp")
+
+    if pd.isna(low_setup) or low_setup <= 0:
+        return None, None
+
+    try:
+        ts_text = pd.Timestamp(ts).isoformat()
+    except Exception:
+        ts_text = str(ts or "")
+
+    return float(low_setup), ts_text
+
 def caminho_json(par, timeframe, objective="mar"):
     return DIRETORIO_OPT / f"opt_{par}_{normalize_timeframe(timeframe)}m_{objective}.json"
 
@@ -756,21 +799,43 @@ def enviar_telegram(message: str, cfg: SpotContextConfig):
 def validar_parametros_bybit(grid: dict, current_price: float, status: str) -> tuple[bool, str]:
     if not grid or not current_price:
         return False, "sem_parametros"
-    entry, lower, upper = grid["ENTRY"], grid["LOWER"], grid["UPPER"]
-    sl, tp, grids = grid["SL"], grid["TP"], int(grid["GRIDS"])
+
+    entry = _to_float(grid.get("ENTRY"))
+    lower = _to_float(grid.get("LOWER"))
+    upper = _to_float(grid.get("UPPER"))
+    sl = _to_float(grid.get("SL"))
+    tp = _to_float(grid.get("TP"))
+    grids = _to_int(grid.get("GRIDS"), 0)
+    trailing_up = _to_bool(grid.get("TRAILING_UP"), False)
+    trailing_limit = _to_float(grid.get("TRAILING_UP_LIMIT"))
+
     reasons = []
-    # Entry Price do Spot Grid não pode ser maior que o preço de mercado.
+
+    if any(pd.isna(x) for x in [entry, lower, upper, sl, tp]):
+        return False, "parametros_numericos_invalidos"
+
     if status.startswith("DISPARAR") and entry > current_price * 1.000001:
         reasons.append("entry_acima_mercado")
+
     if lower < current_price * 0.30 or lower > current_price * 1.20:
         reasons.append("lower_fora_limite")
     if upper < current_price * 0.80 or upper > current_price * 3.00:
         reasons.append("upper_fora_limite")
-    if not (2 <= grids <= 200): reasons.append("grids_fora_limite")
-    if not (sl < lower and sl < entry): reasons.append("sl_invalido")
-    if not (tp > upper and tp > entry): reasons.append("tp_invalido")
-    return len(reasons) == 0, ";".join(reasons)
+    if not (2 <= grids <= 200):
+        reasons.append("grids_fora_limite")
 
+    if not (sl < lower and sl < entry):
+        reasons.append("sl_invalido")
+    if not (tp > upper and tp > entry):
+        reasons.append("tp_invalido")
+
+    if trailing_up:
+        if pd.isna(trailing_limit):
+            reasons.append("trailing_up_limit_ausente")
+        elif not (trailing_limit > upper and tp > trailing_limit):
+            reasons.append("trailing_up_limit_invalido")
+
+    return len(reasons) == 0, ";".join(reasons)
 
 def gerar_excel(resultados, universo, forca, cfg):
     out = pd.DataFrame(resultados)
@@ -802,7 +867,11 @@ def gerar_excel(resultados, universo, forca, cfg):
                 fmt = None
                 if col in {"SPREAD_PCT", "SLIPPAGE_EST_PCT", "ATR_PCT", "RET_3C", "RET_6C", "RET_12C"}:
                     fmt = pct
-                elif col in {"GATILHO", "PRECO_ATUAL", "LOWER", "UPPER", "SL", "TP", "ATR_M1"}:
+                elif col in {
+                    "GATILHO", "PRECO_ATUAL", "LOW_SETUP", "TICK_SIZE",
+                    "LOWER", "UPPER", "SL", "TP", "TRAILING_UP_LIMIT",
+                    "GRID_INTERVAL_PRICE", "ATR_M1"
+                }:
                     fmt = dec
                 elif col in {"SCORE_TOTAL", "SCORE_LIQUIDEZ", "SCORE_REGIME", "SCORE_FORCA", "RANK_FORCA"}:
                     fmt = num
@@ -879,6 +948,12 @@ def run_scan(args):
         )
 
         tick_size = _to_float(row.get("TickSize"), 0.01)
+        low_setup, candle_setup_ts = (
+            localizar_candle_setup_compra(df, trigger)
+            if direction == "COMPRA"
+            else (None, None)
+        )
+
         params = garantir_params_spot(
             par, tf, df, cfg, objective=args.objective,
             auto_optimize=args.auto_optimize, tick_size=tick_size,
@@ -898,7 +973,7 @@ def run_scan(args):
         score = score_spot_candidate(direction, setup, last_closed, context, rs_map.get(key), cfg)
 
         grid = {}
-        if direction == "COMPRA":
+        if direction == "COMPRA" and low_setup is not None and low_setup < trigger:
             grid = spot_grid_parameters(
                 entry=trigger,
                 atr=atr_m1,
@@ -912,8 +987,23 @@ def run_scan(args):
                 min_grids=cfg.min_grids,
                 max_grids=cfg.max_grids,
                 trailing_slope_pct=cfg.slope_trailing_up_pct,
+                low_setup=low_setup,
+                tick_size=tick_size,
+                sl_buffer_ticks=cfg.sl_buffer_ticks,
+                trailing_up_steps=cfg.trailing_up_steps,
+                tp_extra_grids=cfg.tp_extra_grids,
             )
-        valid, invalid_reason = validar_parametros_bybit(grid, current, status) if grid else (False, "nao_aplicavel")
+
+        if direction == "COMPRA" and low_setup is None:
+            valid, invalid_reason = False, "low_setup_indisponivel"
+        elif direction == "COMPRA" and not grid:
+            valid, invalid_reason = False, "grid_invalido_low_setup"
+        else:
+            valid, invalid_reason = (
+                validar_parametros_bybit(grid, current, status)
+                if grid
+                else (False, "nao_aplicavel")
+            )
 
         result = {
             "Par": par,
@@ -926,6 +1016,10 @@ def run_scan(args):
             "DECISAO_SPOT": action,
             "GATILHO": trigger,
             "PRECO_ATUAL": current,
+            "LOW_SETUP": low_setup,
+            "CANDLE_SETUP_TS": candle_setup_ts,
+            "TICK_SIZE": tick_size,
+            "GRID_MODEL": "LOW_SETUP_TRAILING_V1",
             "DIST_GATILHO_PCT": (current / trigger - 1) * 100 if trigger else np.nan,
             "ATR_PERIOD": params["atr_period"],
             "PARAM_ORIGEM": params["origem"],

@@ -1,4 +1,4 @@
-# Monitor Spot Grid v2.9
+# Monitor Spot Grid v3.0
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from bybit_spot_common import get_ticker, get_kline, normalize_timeframe, spot_g
 from bybit_setups_script_hr_context_spot import (
     capturar_contexto_spot,
     escolher_setup_spot,
+    localizar_candle_setup_compra,
     ler_config_spot,
     validar_parametros_bybit,
     legacy,
@@ -106,12 +107,15 @@ def save_state(state):
 
 def candidate_key(row):
     gat = _float(row.get("GATILHO"))
+    low = _float(row.get("LOW_SETUP"))
     gat_key = f"{gat:.12g}" if gat is not None else ""
+    low_key = f"{low:.12g}" if low is not None else ""
     return "|".join([
         str(row.get("Par", "")).upper(),
         str(row.get("Timeframe", "")),
         str(row.get("Setup", "")),
         gat_key,
+        low_key,
     ])
 
 
@@ -144,8 +148,8 @@ def load_candidates():
 
     required = {
         "Par", "Timeframe", "Setup", "SINAL_ORIGINAL",
-        "DECISAO_SPOT", "GATILHO", "APROVADO_SCORE",
-        "PARAMETROS_BYBIT_VALIDOS",
+        "DECISAO_SPOT", "GATILHO", "LOW_SETUP", "TICK_SIZE",
+        "APROVADO_SCORE", "PARAMETROS_BYBIT_VALIDOS",
     }
     missing = sorted(required - set(df.columns))
     if missing:
@@ -163,8 +167,10 @@ def load_candidates():
 def grid_dict(row):
     keys = [
         "ENTRY", "LOWER", "UPPER", "GRIDS", "GRID_SPACING_PCT",
-        "GRID_NET_EST_PCT", "SL", "TP", "TS_RETRACAO_PCT",
-        "TRAILING_UP", "ESTRATEGIA_GRID", "REGIME_SPOT", "ATR_PCT_SPOT",
+        "GRID_NET_EST_PCT", "GRID_INTERVAL_PRICE", "SL", "TP",
+        "TS_RETRACAO_PCT", "TRAILING_UP", "TRAILING_UP_LIMIT",
+        "TRAILING_UP_STEPS", "TP_EXTRA_GRIDS", "LOW_SETUP",
+        "ESTRATEGIA_GRID", "REGIME_SPOT", "ATR_PCT_SPOT",
     ]
     return {k: row.get(k) for k in keys if k in row.index}
 
@@ -188,11 +194,12 @@ def hard_revalidation(par, cfg, ticker):
 
 
 def technical_revalidation(row, cfg, current_price=None):
-    # Revalida sem exigir persistência do evento de setup em candles seguintes.
     par = str(row["Par"]).strip().upper()
     tf = normalize_timeframe(row["Timeframe"])
     expected_setup = str(row.get("Setup", "")).strip()
     original_trigger = _float(row.get("GATILHO"))
+    original_low_setup = _float(row.get("LOW_SETUP"))
+    tick_size = _float(row.get("TICK_SIZE"))
     decision = str(row.get("DECISAO_SPOT", "")).strip().upper()
 
     limit = min(
@@ -273,11 +280,16 @@ def technical_revalidation(row, cfg, current_price=None):
 
     if atr_m1 is None or atr_m1 <= 0:
         reasons.append("atr_absoluto_invalido")
-
     if original_trigger is None or original_trigger <= 0:
         reasons.append("gatilho_original_invalido")
+    if original_low_setup is None or original_low_setup <= 0:
+        reasons.append("low_setup_indisponivel")
+    if tick_size is None or tick_size <= 0:
+        reasons.append("tick_size_indisponivel")
 
     effective_trigger = original_trigger
+    effective_low_setup = original_low_setup
+    effective_candle_setup_ts = str(row.get("CANDLE_SETUP_TS", "") or "")
 
     if (
         signal
@@ -288,6 +300,13 @@ def technical_revalidation(row, cfg, current_price=None):
     ):
         effective_trigger = trigger_now
 
+        low_now, candle_ts_now = localizar_candle_setup_compra(df, trigger_now)
+        if low_now is not None:
+            effective_low_setup = low_now
+            effective_candle_setup_ts = candle_ts_now
+        else:
+            reasons.append("low_setup_atual_nao_localizado")
+
         if status.startswith("ARMAR") and current_price is not None:
             if current_price < trigger_now:
                 if not (
@@ -297,9 +316,20 @@ def technical_revalidation(row, cfg, current_price=None):
                 ):
                     reasons.append("novo_gatilho_nao_atingido")
 
-    # Se existe um evento atual do MESMO setup, o gatilho atual passa a
-    # prevalecer sobre o gatilho que estava na planilha do scan.
-    # Isso evita manter AGUARDANDO quando o setup atual já está DISPARAR.
+    if (
+        effective_low_setup is not None
+        and effective_trigger is not None
+        and effective_low_setup >= effective_trigger
+    ):
+        reasons.append("low_setup_acima_gatilho")
+
+    if (
+        current_price is not None
+        and effective_low_setup is not None
+        and current_price <= effective_low_setup
+    ):
+        reasons.append("low_setup_rompido")
+
     waiting_effective = (
         decision == "AGUARDAR_GATILHO"
         and current_price is not None
@@ -339,7 +369,17 @@ def technical_revalidation(row, cfg, current_price=None):
             min_grids=cfg.min_grids,
             max_grids=cfg.max_grids,
             trailing_slope_pct=cfg.slope_trailing_up_pct,
+            low_setup=effective_low_setup,
+            tick_size=tick_size,
+            sl_buffer_ticks=cfg.sl_buffer_ticks,
+            trailing_up_steps=cfg.trailing_up_steps,
+            tp_extra_grids=cfg.tp_extra_grids,
         )
+
+        if not grid_now:
+            reasons.append("grid_atual_invalido")
+            technical_state = "INVALIDADO"
+
     else:
         technical_state = "INVALIDADO"
 
@@ -351,6 +391,8 @@ def technical_revalidation(row, cfg, current_price=None):
         "gatilho_original": original_trigger,
         "gatilho_evento_atual": trigger_now,
         "gatilho_atual": effective_trigger,
+        "low_setup_atual": effective_low_setup,
+        "candle_setup_ts_atual": effective_candle_setup_ts,
         "preco_atual": current_price,
         "atr_pct_atual": atr_pct_real,
         "atr_m1_atual": atr_m1,
@@ -361,7 +403,6 @@ def technical_revalidation(row, cfg, current_price=None):
     }
 
     return len(reasons) == 0, reasons, info
-
 
 def technical_check_all(verbose=True):
     cfg = ler_config_spot()
@@ -412,6 +453,7 @@ def technical_check_all(verbose=True):
                 f"evento={info.get('status_atual') or '-':<20} "
                 f"ATR={_fmt_pct_value(info.get('atr_pct_atual'), 2):>8} "
                 f"Gat={_fmt_price(info.get('gatilho_atual')):>12} "
+                f"Low={_fmt_price(info.get('low_setup_atual')):>12} "
                 f"Grids={_fmt_int((info.get('grid_atual') or {}).get('GRIDS')):>3} "
                 f"Aviso={warnings}"
             )
@@ -429,21 +471,39 @@ def build_ready_message(row, last, ctx, grid, technical_info):
     score = _float(row.get("SCORE_TOTAL"), 0.0)
     trigger_now = technical_info.get("gatilho_atual")
     atr_pct_now = technical_info.get("atr_pct_atual")
+    low_setup = technical_info.get("low_setup_atual")
+    candle_setup_ts = technical_info.get("candle_setup_ts_atual") or "-"
+    trailing = _bool(grid.get("TRAILING_UP"))
+    trailing_limit = grid.get("TRAILING_UP_LIMIT")
+
+    trailing_line = (
+        f"Trailing Up: SIM | Limite: {_fmt_price(trailing_limit)} | "
+        f"Reserva: {_fmt_int(grid.get('TRAILING_UP_STEPS'))} deslocamentos"
+        if trailing
+        else "Trailing Up: NÃO"
+    )
 
     return (
         f"GRID PRONTO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
         f"Preço: {_fmt_price(last)} | Gatilho atual: {_fmt_price(trigger_now)}\n"
         f"Score scan: {score:.2f} | ATR atual: {_fmt_pct_value(atr_pct_now, 2)}\n"
-        f"Faixa atual: {_fmt_price(grid.get('LOWER'))} - {_fmt_price(grid.get('UPPER'))}\n"
+        f"\nFAIXA INICIAL\n"
+        f"Lower: {_fmt_price(grid.get('LOWER'))} | Upper: {_fmt_price(grid.get('UPPER'))}\n"
         f"Grids: {_fmt_int(grid.get('GRIDS'))} | "
+        f"Intervalo: {_fmt_price(grid.get('GRID_INTERVAL_PRICE'))} | "
         f"Líq/grid est.: {_fmt_pct_value(grid.get('GRID_NET_EST_PCT'))}\n"
-        f"TP: {_fmt_price(grid.get('TP'))} | SL: {_fmt_price(grid.get('SL'))}\n"
-        f"TS retração: {_fmt_pct_value(grid.get('TS_RETRACAO_PCT'), 2)} | "
-        f"Trailing Up: {_fmt_yesno(grid.get('TRAILING_UP'))}\n"
+        f"\nPROTEÇÃO\n"
+        f"Low setup: {_fmt_price(low_setup)} | SL: {_fmt_price(grid.get('SL'))}\n"
+        f"Candle setup: {candle_setup_ts}\n"
+        f"\nTRAILING / TP\n"
+        f"{trailing_line}\n"
+        f"TP: {_fmt_price(grid.get('TP'))} | "
+        f"Margem TP: {_fmt_int(grid.get('TP_EXTRA_GRIDS'))} grid(s)\n"
+        f"TS retração: {_fmt_pct_value(grid.get('TS_RETRACAO_PCT'), 2)}\n"
+        f"\nMERCADO\n"
         f"Depth 1%: {_fmt_depth(ctx.get('DepthMin1Pct'))} | "
         f"Spread: {_fmt_pct_fraction(ctx.get('Spread_Pct'))}"
     )
-
 
 def build_near_message(row, last, dist_pct):
     return (
@@ -668,7 +728,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v2.9")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.0")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)

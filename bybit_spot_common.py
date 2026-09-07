@@ -148,20 +148,52 @@ def spot_grid_parameters(
     min_grids: int = 2,
     max_grids: int = 200,
     trailing_slope_pct: float = 0.75,
+    low_setup: float | None = None,
+    tick_size: float | None = None,
+    sl_buffer_ticks: int = 2,
+    trailing_up_steps: int = 3,
+    tp_extra_grids: int = 1,
 ) -> dict:
+    # Modelo Spot Grid ancorado no candle do setup.
+    # LOWER = LOW_SETUP; SL fica N ticks abaixo.
+    # UPPER = ENTRY + ATR; TP reserva espaço para Trailing Up.
     if entry <= 0 or atr <= 0:
         return {}
 
+    tick = float(tick_size or 0.0)
+    if tick <= 0:
+        tick = max(abs(entry) * 1e-8, 1e-12)
+
+    def round_down_tick(x: float) -> float:
+        return math.floor((x / tick) + 1e-10) * tick
+
+    def round_up_tick(x: float) -> float:
+        return math.ceil((x / tick) - 1e-10) * tick
+
+    low_setup_value = float(low_setup) if low_setup is not None else None
+
+    if low_setup_value is not None and low_setup_value > 0:
+        lower = round_down_tick(low_setup_value)
+    else:
+        # Fallback mantido apenas por compatibilidade.
+        lower = round_down_tick(max(entry * 0.01, entry - range_atr_down * atr))
+
+    if lower <= 0 or lower >= entry:
+        return {}
+
+    upper = round_up_tick(entry + range_atr_up * atr)
+    if upper <= entry or upper <= lower:
+        return {}
+
     atr_pct = atr / entry * 100.0
-    lower = max(entry * 0.01, entry - range_atr_down * atr)
-    upper = entry + range_atr_up * atr
     width_pct = (upper - lower) / entry * 100.0
 
-    # Espaçamento precisa cobrir fee de compra + fee de venda + ganho líquido mínimo.
     min_spacing = max(0.01, 2 * fee_side_pct + min_net_grid_pct)
     grids = math.floor(width_pct / min_spacing)
     grids = max(int(min_grids), min(int(max_grids), grids))
-    spacing_pct = width_pct / grids
+
+    interval_price = (upper - lower) / grids
+    spacing_pct = interval_price / entry * 100.0
 
     slope = float(slope_pct or 0)
     regime = (
@@ -170,17 +202,47 @@ def spot_grid_parameters(
     )
     trailing_up = regime == "ALTA"
 
+    sl_ticks = max(1, int(sl_buffer_ticks))
+    sl = round_down_tick(lower - sl_ticks * tick)
+    if sl <= 0 or sl >= lower:
+        return {}
+
+    steps = max(0, int(trailing_up_steps))
+    extra = max(1, int(tp_extra_grids))
+
+    trailing_up_limit = None
+    if trailing_up:
+        trailing_up_limit = round_up_tick(upper + steps * interval_price)
+        tp = round_up_tick(trailing_up_limit + extra * interval_price)
+    else:
+        tp = round_up_tick(upper + extra * interval_price)
+
+    if tp <= upper:
+        return {}
+    if trailing_up and (
+        trailing_up_limit is None
+        or trailing_up_limit <= upper
+        or tp <= trailing_up_limit
+    ):
+        return {}
+
     return {
         "ENTRY": entry,
+        "LOW_SETUP": lower,
         "LOWER": lower,
         "UPPER": upper,
         "GRIDS": grids,
+        "GRID_INTERVAL_PRICE": interval_price,
         "GRID_SPACING_PCT": spacing_pct,
         "GRID_NET_EST_PCT": max(0.0, spacing_pct - 2 * fee_side_pct),
-        "SL": max(entry * 0.001, lower - sl_buffer_atr * atr),
-        "TP": upper + tp_buffer_atr * atr,
+        "SL": sl,
+        "SL_BUFFER_TICKS": sl_ticks,
+        "TP": tp,
         "TS_RETRACAO_PCT": max(3.0, min(20.0, 2 * atr_pct)),
         "TRAILING_UP": trailing_up,
+        "TRAILING_UP_LIMIT": trailing_up_limit,
+        "TRAILING_UP_STEPS": steps if trailing_up else 0,
+        "TP_EXTRA_GRIDS": extra,
         "ESTRATEGIA_GRID": "TRAILING_UP" if trailing_up else "NORMAL",
         "REGIME_SPOT": regime,
         "ATR_PCT_SPOT": atr_pct,
