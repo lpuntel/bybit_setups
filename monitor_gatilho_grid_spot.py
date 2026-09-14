@@ -22,6 +22,10 @@ from bybit_setups_script_hr_context_spot import (
     validar_parametros_bybit,
     legacy,
 )
+from spot_research_log import (
+    log_monitor_observation,
+    log_monitor_event,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -606,6 +610,10 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         last = _float(ticker.get("lastPrice"), 0.0)
         gat = _float(row.get("GATILHO"), 0.0)
 
+        log_monitor_observation(
+            row, last, decision, rec
+        )
+
         if not last or not gat:
             continue
 
@@ -628,6 +636,13 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
                 if not pre_ok:
                     stats["prealertas_bloq_tecnico"] += 1
+                    log_monitor_event(
+                        "PREALERT_BLOCKED_TECHNICAL",
+                        row,
+                        current_price=last,
+                        reasons=pre_reasons,
+                        info=pre_info,
+                    )
                     if verbose:
                         print(
                             f"[PRÉ-ALERTA TÉCNICO] {par} {row['Timeframe']} bloqueado: "
@@ -641,6 +656,13 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                         rec["prealert_sent"] = True
                         stats["prealertas"] += 1
                         changed = True
+                        log_monitor_event(
+                            "PREALERT_SENT",
+                            row,
+                            current_price=last,
+                            info=pre_info,
+                            extra={"distance_pct": dist_abs},
+                        )
 
             if last < gat or rec.get("ready_sent", False):
                 continue
@@ -653,6 +675,12 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
             if not _bool(row.get("PARAMETROS_BYBIT_VALIDOS")):
                 stats["bybit_invalidos"] += 1
+                log_monitor_event(
+                    "SCAN_PARAMS_INVALID",
+                    row,
+                    current_price=last,
+                    reasons=[str(row.get("PARAMETROS_BYBIT_MOTIVO", ""))],
+                )
                 continue
         else:
             continue
@@ -660,6 +688,17 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         hard_ok, hard_reasons, ctx = hard_revalidation(par, cfg, ticker)
         if not hard_ok:
             stats["bloqueados_revalidacao"] += 1
+            log_monitor_event(
+                "HARD_REVALIDATION_BLOCKED",
+                row,
+                current_price=last,
+                reasons=hard_reasons,
+                extra={
+                    "spread_pct": ctx.get("Spread_Pct"),
+                    "depth_1pct": ctx.get("DepthMin1Pct"),
+                    "turnover24h": ctx.get("Turnover24h"),
+                },
+            )
             if verbose:
                 print(
                     f"[REVALIDAÇÃO] {par} {row['Timeframe']} bloqueado: "
@@ -674,6 +713,13 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         )
         if not technical_ok:
             stats["bloqueados_tecnico"] += 1
+            log_monitor_event(
+                "TECHNICAL_BLOCKED",
+                row,
+                current_price=last,
+                reasons=technical_reasons,
+                info=technical_info,
+            )
             if verbose:
                 print(
                     f"[TÉCNICO] {par} {row['Timeframe']} bloqueado: "
@@ -705,6 +751,16 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                         )
                     rec["overshoot_logged"] = True
                     changed = True
+                    log_monitor_event(
+                        "TRIGGER_OVERSHOOT",
+                        row,
+                        current_price=last,
+                        info=technical_info,
+                        extra={
+                            "overshoot_pct": overshoot_pct,
+                            "tolerance_pct": tolerance_pct,
+                        },
+                    )
 
                 continue
 
@@ -721,6 +777,13 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         )
         if not bybit_ok:
             stats["bybit_invalidos"] += 1
+            log_monitor_event(
+                "GRID_PARAMS_INVALID_AFTER_REVALIDATION",
+                row,
+                current_price=last,
+                reasons=[bybit_reason],
+                info=technical_info,
+            )
             if verbose:
                 print(
                     f"[BYBIT] {par} {row['Timeframe']} inválido: {bybit_reason}"
@@ -736,6 +799,16 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
             stats["prontos"] += 1
             changed = True
+            log_monitor_event(
+                "GRID_READY",
+                row,
+                current_price=last,
+                info=technical_info,
+                extra={
+                    "spread_pct": ctx.get("Spread_Pct"),
+                    "depth_1pct": ctx.get("DepthMin1Pct"),
+                },
+            )
 
     stale = [k for k in state if k not in active_keys]
     for k in stale:

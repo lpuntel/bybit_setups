@@ -41,6 +41,7 @@ from bybit_spot_common import (
     spot_grid_parameters,
 )
 from optimizer_atr_sl_tp_spot import run_optimization_with_setups
+from spot_research_log import log_scanner_candidate
 
 BASE_DIR = Path(__file__).resolve().parent
 ARQUIVO_EXCEL = BASE_DIR / "ativos_spot.xlsx"
@@ -1148,6 +1149,7 @@ def run_scan(args):
             "Último Setup Identificado": f"{status} (gatilho: {trigger:.7f})",
         }
         raw_rows.append(result)
+        log_scanner_candidate(result)
 
         if action == "GRID" and score["APROVADO_SCORE"]:
             enviar_telegram(
