@@ -90,6 +90,20 @@ def _fmt_yesno(v):
     return "SIM" if _bool(v) else "NÃO"
 
 
+def _fmt_setup_datetime(v):
+    """Formata o timestamp do candle do setup em UTC para leitura rápida no Telegram."""
+    if v is None:
+        return "-"
+    try:
+        ts = pd.to_datetime(v, utc=True)
+        if pd.isna(ts):
+            return "-"
+        return ts.strftime("%d/%m/%Y %H:%M UTC")
+    except Exception:
+        s = str(v).strip()
+        return s if s else "-"
+
+
 def load_state():
     if not STATE_FILE.exists():
         return {}
@@ -489,6 +503,7 @@ def build_ready_message(row, last, ctx, grid, technical_info):
 
     return (
         f"GRID PRONTO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
+        f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
         f"Preço: {_fmt_price(last)} | Gatilho atual: {_fmt_price(trigger_now)}\n"
         f"Score scan: {score:.2f} | ATR atual: {_fmt_pct_value(atr_pct_now, 2)}\n"
         f"\nFAIXA INICIAL\n"
@@ -509,9 +524,16 @@ def build_ready_message(row, last, ctx, grid, technical_info):
         f"Spread: {_fmt_pct_fraction(ctx.get('Spread_Pct'))}"
     )
 
-def build_near_message(row, last, dist_pct):
+def build_near_message(row, last, dist_pct, technical_info=None):
+    technical_info = technical_info or {}
+    candle_setup_ts = (
+        technical_info.get("candle_setup_ts_atual")
+        or row.get("CANDLE_SETUP_TS")
+        or "-"
+    )
     return (
         f"APROXIMANDO GATILHO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
+        f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
         f"Preço: {_fmt_price(last)}\n"
         f"Gatilho: {_fmt_price(row.get('GATILHO'))}\n"
         f"Distância: {dist_pct:.3f}%\n"
@@ -650,7 +672,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                         )
                 else:
                     if send(
-                        build_near_message(row, last, dist_abs),
+                        build_near_message(row, last, dist_abs, pre_info),
                         dry_run=dry_run,
                     ):
                         rec["prealert_sent"] = True
