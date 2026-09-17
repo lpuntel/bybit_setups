@@ -91,14 +91,15 @@ def _fmt_yesno(v):
 
 
 def _fmt_setup_datetime(v):
-    """Formata o timestamp do candle do setup em UTC para leitura rápida no Telegram."""
+    """Formata o timestamp do candle do setup em UTC-3 para leitura rápida no Telegram."""
     if v is None:
         return "-"
     try:
         ts = pd.to_datetime(v, utc=True)
         if pd.isna(ts):
             return "-"
-        return ts.strftime("%d/%m/%Y %H:%M UTC")
+        ts = ts - pd.Timedelta(hours=3)
+        return ts.strftime("%d/%m/%Y %H:%M UTC-3")
     except Exception:
         s = str(v).strip()
         return s if s else "-"
@@ -486,10 +487,7 @@ def technical_check_all(verbose=True):
 
 
 def build_ready_message(row, last, ctx, grid, technical_info):
-    score = _float(row.get("SCORE_TOTAL"), 0.0)
     trigger_now = technical_info.get("gatilho_atual")
-    atr_pct_now = technical_info.get("atr_pct_atual")
-    low_setup = technical_info.get("low_setup_atual")
     candle_setup_ts = technical_info.get("candle_setup_ts_atual") or "-"
     trailing = _bool(grid.get("TRAILING_UP"))
     trailing_limit = grid.get("TRAILING_UP_LIMIT")
@@ -504,24 +502,16 @@ def build_ready_message(row, last, ctx, grid, technical_info):
     return (
         f"GRID PRONTO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
         f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
-        f"Preço: {_fmt_price(last)} | Gatilho atual: {_fmt_price(trigger_now)}\n"
-        f"Score scan: {score:.2f} | ATR atual: {_fmt_pct_value(atr_pct_now, 2)}\n"
-        f"\nFAIXA INICIAL\n"
+        f"\nFAIXA INICIAL / GRID\n"
         f"Lower: {_fmt_price(grid.get('LOWER'))} | Upper: {_fmt_price(grid.get('UPPER'))}\n"
         f"Grids: {_fmt_int(grid.get('GRIDS'))} | "
         f"Intervalo: {_fmt_price(grid.get('GRID_INTERVAL_PRICE'))} | "
         f"Líq/grid est.: {_fmt_pct_value(grid.get('GRID_NET_EST_PCT'))}\n"
-        f"\nPROTEÇÃO\n"
-        f"Low setup: {_fmt_price(low_setup)} | SL: {_fmt_price(grid.get('SL'))}\n"
-        f"Candle setup: {candle_setup_ts}\n"
-        f"\nTRAILING / TP\n"
-        f"{trailing_line}\n"
-        f"TP: {_fmt_price(grid.get('TP'))} | "
-        f"Margem TP: {_fmt_int(grid.get('TP_EXTRA_GRIDS'))} grid(s)\n"
-        f"TS retração: {_fmt_pct_value(grid.get('TS_RETRACAO_PCT'), 2)}\n"
-        f"\nMERCADO\n"
-        f"Depth 1%: {_fmt_depth(ctx.get('DepthMin1Pct'))} | "
-        f"Spread: {_fmt_pct_fraction(ctx.get('Spread_Pct'))}"
+        f"\nTS retração: {_fmt_pct_value(grid.get('TS_RETRACAO_PCT'), 2)}\n"
+        f"\nGatilho: {_fmt_price(trigger_now)} | Preço Atual = {_fmt_price(last)}\n"
+        f"\n{trailing_line}\n"
+        f"\nSL: {_fmt_price(grid.get('SL'))}\n"
+        f"\nTP: {_fmt_price(grid.get('TP'))}"
     )
 
 def build_near_message(row, last, dist_pct, technical_info=None):
