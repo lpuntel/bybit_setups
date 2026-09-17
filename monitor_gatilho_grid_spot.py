@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.0.2
+# Monitor Spot Grid v3.0.3
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -103,6 +103,29 @@ def _fmt_setup_datetime(v):
     except Exception:
         s = str(v).strip()
         return s if s else "-"
+
+
+def _setup_expiry_utc(candle_setup_ts, timeframe):
+    """Retorna o instante UTC em que o candle do setup deixa de ser válido."""
+    try:
+        ts = pd.to_datetime(candle_setup_ts, utc=True)
+        if pd.isna(ts):
+            return None
+
+        tf = normalize_timeframe(timeframe)
+        if tf == "D":
+            return ts + pd.Timedelta(days=1)
+        if tf == "W":
+            return ts + pd.Timedelta(days=7)
+        if tf == "M":
+            return ts + pd.DateOffset(months=1)
+
+        minutes = int(float(tf))
+        if minutes <= 0:
+            return None
+        return ts + pd.Timedelta(minutes=minutes)
+    except Exception:
+        return None
 
 
 def load_state():
@@ -335,6 +358,12 @@ def technical_revalidation(row, cfg, current_price=None):
                 ):
                     reasons.append("novo_gatilho_nao_atingido")
 
+    setup_expiry_utc = _setup_expiry_utc(effective_candle_setup_ts, tf)
+    if setup_expiry_utc is None:
+        reasons.append("candle_setup_ts_invalido")
+    elif pd.Timestamp.now(tz="UTC") >= setup_expiry_utc:
+        reasons.append("setup_expirado")
+
     if (
         effective_low_setup is not None
         and effective_trigger is not None
@@ -412,6 +441,11 @@ def technical_revalidation(row, cfg, current_price=None):
         "gatilho_atual": effective_trigger,
         "low_setup_atual": effective_low_setup,
         "candle_setup_ts_atual": effective_candle_setup_ts,
+        "setup_expiry_utc": (
+            setup_expiry_utc.isoformat()
+            if setup_expiry_utc is not None
+            else None
+        ),
         "preco_atual": current_price,
         "atr_pct_atual": atr_pct_real,
         "atr_m1_atual": atr_m1,
@@ -546,6 +580,7 @@ def prime_state(tolerance_pct=1.0):
             "prealert_sent": False,
             "ready_sent": False,
             "overshoot_logged": False,
+            "expired_logged": False,
             "last_decision": decision,
         }
 
@@ -600,6 +635,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         "prontos": 0,
         "bloqueados_revalidacao": 0,
         "bloqueados_tecnico": 0,
+        "setups_expirados": 0,
         "gatilho_ultrapassado": 0,
         "bybit_invalidos": 0,
     }
@@ -614,6 +650,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             "prealert_sent": False,
             "ready_sent": False,
             "overshoot_logged": False,
+            "expired_logged": False,
             "last_decision": decision,
         })
         rec["last_decision"] = decision
@@ -648,6 +685,19 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
                 if not pre_ok:
                     stats["prealertas_bloq_tecnico"] += 1
+                    if "setup_expirado" in pre_reasons:
+                        stats["setups_expirados"] += 1
+                        if not rec.get("expired_logged", False):
+                            log_monitor_event(
+                                "SETUP_EXPIRED",
+                                row,
+                                current_price=last,
+                                reasons=["setup_expirado"],
+                                info=pre_info,
+                                extra={"setup_expiry_utc": pre_info.get("setup_expiry_utc")},
+                            )
+                            rec["expired_logged"] = True
+                            changed = True
                     log_monitor_event(
                         "PREALERT_BLOCKED_TECHNICAL",
                         row,
@@ -661,6 +711,9 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                             + ";".join(pre_reasons)
                         )
                 else:
+                    if rec.get("expired_logged", False):
+                        rec["expired_logged"] = False
+                        changed = True
                     if send(
                         build_near_message(row, last, dist_abs, pre_info),
                         dry_run=dry_run,
@@ -725,6 +778,19 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         )
         if not technical_ok:
             stats["bloqueados_tecnico"] += 1
+            if "setup_expirado" in technical_reasons:
+                stats["setups_expirados"] += 1
+                if not rec.get("expired_logged", False):
+                    log_monitor_event(
+                        "SETUP_EXPIRED",
+                        row,
+                        current_price=last,
+                        reasons=["setup_expirado"],
+                        info=technical_info,
+                        extra={"setup_expiry_utc": technical_info.get("setup_expiry_utc")},
+                    )
+                    rec["expired_logged"] = True
+                    changed = True
             log_monitor_event(
                 "TECHNICAL_BLOCKED",
                 row,
@@ -738,6 +804,10 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                     + ";".join(technical_reasons)
                 )
             continue
+
+        if rec.get("expired_logged", False):
+            rec["expired_logged"] = False
+            changed = True
 
         effective_trigger = _float(
             technical_info.get("gatilho_atual"),
@@ -841,6 +911,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             f"prontos={stats['prontos']} "
             f"revalidacao_bloq={stats['bloqueados_revalidacao']} "
             f"tecnico_bloq={stats['bloqueados_tecnico']} "
+            f"setup_expirado={stats['setups_expirados']} "
             f"gatilho_ultrapassado={stats['gatilho_ultrapassado']} "
             f"bybit_invalidos={stats['bybit_invalidos']}"
         )
