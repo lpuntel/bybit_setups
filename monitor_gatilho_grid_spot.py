@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.0.3
+# Monitor Spot Grid v3.0.4
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -103,29 +103,6 @@ def _fmt_setup_datetime(v):
     except Exception:
         s = str(v).strip()
         return s if s else "-"
-
-
-def _setup_expiry_utc(candle_setup_ts, timeframe):
-    """Retorna o instante UTC em que o candle do setup deixa de ser válido."""
-    try:
-        ts = pd.to_datetime(candle_setup_ts, utc=True)
-        if pd.isna(ts):
-            return None
-
-        tf = normalize_timeframe(timeframe)
-        if tf == "D":
-            return ts + pd.Timedelta(days=1)
-        if tf == "W":
-            return ts + pd.Timedelta(days=7)
-        if tf == "M":
-            return ts + pd.DateOffset(months=1)
-
-        minutes = int(float(tf))
-        if minutes <= 0:
-            return None
-        return ts + pd.Timedelta(minutes=minutes)
-    except Exception:
-        return None
 
 
 def load_state():
@@ -291,6 +268,7 @@ def technical_revalidation(row, cfg, current_price=None):
 
     if not signal:
         warnings.append("sem_evento_setup_atual")
+        reasons.append("setup_expirado")
     else:
         if direction == "VENDA":
             reasons.append(f"sinal_contrario:{status or 'VENDA'}")
@@ -357,12 +335,6 @@ def technical_revalidation(row, cfg, current_price=None):
                     and current_price < original_trigger
                 ):
                     reasons.append("novo_gatilho_nao_atingido")
-
-    setup_expiry_utc = _setup_expiry_utc(effective_candle_setup_ts, tf)
-    if setup_expiry_utc is None:
-        reasons.append("candle_setup_ts_invalido")
-    elif pd.Timestamp.now(tz="UTC") >= setup_expiry_utc:
-        reasons.append("setup_expirado")
 
     if (
         effective_low_setup is not None
@@ -441,11 +413,6 @@ def technical_revalidation(row, cfg, current_price=None):
         "gatilho_atual": effective_trigger,
         "low_setup_atual": effective_low_setup,
         "candle_setup_ts_atual": effective_candle_setup_ts,
-        "setup_expiry_utc": (
-            setup_expiry_utc.isoformat()
-            if setup_expiry_utc is not None
-            else None
-        ),
         "preco_atual": current_price,
         "atr_pct_atual": atr_pct_real,
         "atr_m1_atual": atr_m1,
@@ -694,7 +661,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                                 current_price=last,
                                 reasons=["setup_expirado"],
                                 info=pre_info,
-                                extra={"setup_expiry_utc": pre_info.get("setup_expiry_utc")},
+                                extra={"motivo": "sem_evento_setup_atual"},
                             )
                             rec["expired_logged"] = True
                             changed = True
@@ -787,7 +754,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                         current_price=last,
                         reasons=["setup_expirado"],
                         info=technical_info,
-                        extra={"setup_expiry_utc": technical_info.get("setup_expiry_utc")},
+                        extra={"motivo": "sem_evento_setup_atual"},
                     )
                     rec["expired_logged"] = True
                     changed = True

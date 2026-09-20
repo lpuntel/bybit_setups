@@ -191,30 +191,6 @@ def _days_since_ms(ms):
     return (int(time.time() * 1000) - ts) / 86_400_000
 
 
-def _setup_expiry_utc(candle_setup_ts, timeframe):
-    # Retorna o instante UTC em que o candle do setup deixa de ser válido.
-    try:
-        ts = pd.to_datetime(candle_setup_ts, utc=True)
-        if pd.isna(ts):
-            return None
-
-        tf = normalize_timeframe(timeframe)
-        if tf == "D":
-            return ts + pd.Timedelta(days=1)
-        if tf == "W":
-            return ts + pd.Timedelta(days=7)
-        if tf == "M":
-            return ts + pd.DateOffset(months=1)
-
-        minutes = int(float(tf))
-        if minutes <= 0:
-            return None
-
-        return ts + pd.Timedelta(minutes=minutes)
-    except Exception:
-        return None
-
-
 ALIASES = {
     "MODO_UNIVERSO": "modo_universo",
     "TIMEFRAMES_PADRAO": "default_timeframes",
@@ -1067,17 +1043,6 @@ def run_scan(args):
             if direction == "COMPRA"
             else (None, None)
         )
-
-        # Um setup de compra só é válido durante o candle que o originou.
-        # Ao nascer o candle seguinte, o candidato antigo não deve mais ser
-        # publicado na planilha consumida pelo monitor.
-        if direction == "COMPRA":
-            setup_expiry_utc = _setup_expiry_utc(candle_setup_ts, tf)
-            if (
-                setup_expiry_utc is None
-                or pd.Timestamp.now(tz="UTC") >= setup_expiry_utc
-            ):
-                continue
 
         params = garantir_params_spot(
             par, tf, df, cfg, objective=args.objective,
