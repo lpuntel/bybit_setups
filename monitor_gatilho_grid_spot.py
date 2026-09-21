@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.0.4
+# Monitor Spot Grid v3.1.0
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -534,6 +534,267 @@ def build_near_message(row, last, dist_pct, technical_info=None):
     )
 
 
+
+def _activation_row_snapshot(row, effective_trigger=None, effective_low=None, effective_setup_ts=None):
+    """Snapshot mínimo e JSON-serializável para revalidar o setup depois."""
+    return {
+        "Par": str(row.get("Par", "")).strip().upper(),
+        "Timeframe": str(row.get("Timeframe", "")),
+        "Setup": str(row.get("Setup", "")),
+        "GATILHO": _float(effective_trigger, _float(row.get("GATILHO"))),
+        "LOW_SETUP": _float(effective_low, _float(row.get("LOW_SETUP"))),
+        "TICK_SIZE": _float(row.get("TICK_SIZE")),
+        "DECISAO_SPOT": str(row.get("DECISAO_SPOT", "")),
+        "ATR_PERIOD": int(_float(row.get("ATR_PERIOD"), 14) or 14),
+        "CANDLE_SETUP_TS": str(
+            effective_setup_ts
+            or row.get("CANDLE_SETUP_TS", "")
+            or ""
+        ),
+    }
+
+
+def _activation_touch_since(par, trigger, started_at, current_price=None):
+    """Detecta retorno ao gatilho depois do GRID PRONTO."""
+    trigger = _float(trigger)
+    if trigger is None or trigger <= 0 or not started_at:
+        return False, None, None, None
+
+    try:
+        start = pd.to_datetime(started_at, utc=True)
+        if pd.isna(start):
+            return False, None, None, None
+    except Exception:
+        return False, None, None, None
+
+    now = pd.Timestamp.now(tz="UTC")
+    current_price = _float(current_price)
+
+    if current_price is not None and current_price <= trigger:
+        return True, current_price, now.isoformat(), "ticker"
+
+    age_minutes = max(0.0, (now - start).total_seconds() / 60.0)
+    interval = "1" if age_minutes <= 900 else "5"
+    step_minutes = int(interval)
+    limit = min(1000, max(5, int(age_minutes / step_minutes) + 5))
+
+    try:
+        df = get_kline(par, interval, limit=limit)
+    except Exception:
+        return False, None, None, None
+
+    if (
+        df is None
+        or df.empty
+        or "timestamp" not in df.columns
+        or "low" not in df.columns
+    ):
+        return False, None, None, None
+
+    try:
+        ts = pd.to_datetime(df["timestamp"], utc=True)
+        lows = pd.to_numeric(df["low"], errors="coerce")
+
+        # Conservador: ignora o candle parcial iniciado antes do GRID PRONTO,
+        # pois a mínima dele pode ter ocorrido antes do início do watch.
+        cutoff = start.ceil(f"{step_minutes}min")
+        hit = df.loc[(ts >= cutoff) & (lows <= trigger)].copy()
+
+        if hit.empty:
+            return False, None, None, None
+
+        hit["_ts_utc"] = pd.to_datetime(hit["timestamp"], utc=True)
+        first = hit.sort_values("_ts_utc").iloc[0]
+
+        return (
+            True,
+            _float(first.get("low")),
+            pd.to_datetime(first["_ts_utc"], utc=True).isoformat(),
+            f"kline_{interval}m",
+        )
+    except Exception:
+        return False, None, None, None
+
+
+def _start_activation_watch(rec, row, effective_trigger, technical_info=None):
+    technical_info = technical_info or {}
+    now_iso = pd.Timestamp.now(tz="UTC").isoformat()
+
+    effective_low = technical_info.get("low_setup_atual")
+    effective_setup_ts = technical_info.get("candle_setup_ts_atual")
+
+    rec["activation_state"] = "AGUARDANDO_ATIVACAO"
+    rec["activation_trigger"] = _float(effective_trigger)
+    rec["activation_watch_started_at"] = now_iso
+    rec["activation_par"] = str(row.get("Par", "")).strip().upper()
+    rec["activation_timeframe"] = str(row.get("Timeframe", ""))
+    rec["activation_setup"] = str(row.get("Setup", ""))
+    rec["activation_setup_ts"] = str(
+        effective_setup_ts
+        or row.get("CANDLE_SETUP_TS", "")
+        or ""
+    )
+    rec["activation_touch_price"] = None
+    rec["activation_touch_at"] = None
+    rec["activation_row"] = _activation_row_snapshot(
+        row,
+        effective_trigger=effective_trigger,
+        effective_low=effective_low,
+        effective_setup_ts=effective_setup_ts,
+    )
+
+    return now_iso
+
+
+def build_bot_trigger_touched_message(rec, touch_price, touch_at):
+    return (
+        f"GATILHO DO ROBÔ ATINGIDO | "
+        f"{rec.get('activation_par', '-')} "
+        f"{rec.get('activation_timeframe', '-')} | "
+        f"Setup {rec.get('activation_setup', '-')}\n"
+        f"Setup em: {_fmt_setup_datetime(rec.get('activation_setup_ts'))}\n"
+        f"GRID PRONTO em: "
+        f"{_fmt_setup_datetime(rec.get('activation_watch_started_at'))}\n"
+        f"\nGatilho do bot: {_fmt_price(rec.get('activation_trigger'))}\n"
+        f"Preço/mínima observada: {_fmt_price(touch_price)}\n"
+        f"Toque detectado em: {_fmt_setup_datetime(touch_at)}\n"
+        f"\nStatus: preço retornou ao gatilho após o GRID PRONTO.\n"
+        f"Provável ativação do bot; confirmar na Bybit."
+    )
+
+
+def build_bot_not_triggered_message(rec):
+    return (
+        f"ROBÔ NÃO FOI ACIONADO PELO PREÇO | "
+        f"{rec.get('activation_par', '-')} "
+        f"{rec.get('activation_timeframe', '-')} | "
+        f"Setup {rec.get('activation_setup', '-')}\n"
+        f"Setup em: {_fmt_setup_datetime(rec.get('activation_setup_ts'))}\n"
+        f"GRID PRONTO em: "
+        f"{_fmt_setup_datetime(rec.get('activation_watch_started_at'))}\n"
+        f"\nGatilho do bot: {_fmt_price(rec.get('activation_trigger'))}\n"
+        f"\nO setup deixou de estar tecnicamente válido sem o preço "
+        f"retornar ao gatilho após o GRID PRONTO.\n"
+        f"Se o bot ainda estiver aguardando na Bybit, revise/encerre "
+        f"para liberar o capital reservado."
+    )
+
+
+def process_activation_watch(
+    row,
+    rec,
+    cfg,
+    current_price,
+    dry_run=False,
+    verbose=True,
+):
+    if rec.get("activation_state") != "AGUARDANDO_ATIVACAO":
+        return False, None
+
+    par = str(
+        rec.get("activation_par") or row.get("Par", "")
+    ).strip().upper()
+
+    trigger = _float(rec.get("activation_trigger"))
+    started_at = rec.get("activation_watch_started_at")
+
+    touched, touch_price, touch_at, touch_source = _activation_touch_since(
+        par,
+        trigger,
+        started_at,
+        current_price=current_price,
+    )
+
+    if touched:
+        if send(
+            build_bot_trigger_touched_message(
+                rec,
+                touch_price,
+                touch_at,
+            ),
+            dry_run=dry_run,
+        ):
+            rec["activation_state"] = "GATILHO_ATINGIDO"
+            rec["activation_touch_price"] = touch_price
+            rec["activation_touch_at"] = touch_at
+            rec["activation_touch_source"] = touch_source
+
+            log_monitor_event(
+                "BOT_TRIGGER_TOUCHED",
+                row,
+                current_price=current_price,
+                extra={
+                    "activation_trigger": trigger,
+                    "touch_price": touch_price,
+                    "touch_at": touch_at,
+                    "touch_source": touch_source,
+                    "watch_started_at": started_at,
+                },
+            )
+
+            if verbose:
+                print(
+                    f"[BOT] {par} {row.get('Timeframe')} "
+                    f"gatilho atingido após GRID PRONTO"
+                )
+
+            return True, "GATILHO_ATINGIDO"
+
+        return False, None
+
+    technical_ok, technical_reasons, technical_info = technical_revalidation(
+        row,
+        cfg,
+        current_price=current_price,
+    )
+
+    terminal_setup = (
+        "setup_expirado" in technical_reasons
+        or any(
+            str(r).startswith("setup_mudou:")
+            for r in technical_reasons
+        )
+        or any(
+            str(r).startswith("sinal_contrario:")
+            for r in technical_reasons
+        )
+    )
+
+    if not technical_ok and terminal_setup:
+        if send(
+            build_bot_not_triggered_message(rec),
+            dry_run=dry_run,
+        ):
+            rec["activation_state"] = "SETUP_ENCERRADO_SEM_ATIVACAO"
+            rec["activation_ended_at"] = (
+                pd.Timestamp.now(tz="UTC").isoformat()
+            )
+            rec["activation_end_reasons"] = list(technical_reasons)
+
+            log_monitor_event(
+                "BOT_SETUP_ENDED_UNTRIGGERED",
+                row,
+                current_price=current_price,
+                reasons=technical_reasons,
+                info=technical_info,
+                extra={
+                    "activation_trigger": trigger,
+                    "watch_started_at": started_at,
+                },
+            )
+
+            if verbose:
+                print(
+                    f"[BOT] {par} {row.get('Timeframe')} "
+                    f"setup encerrado sem retorno ao gatilho"
+                )
+
+            return True, "SETUP_ENCERRADO_SEM_ATIVACAO"
+
+    return False, None
+
+
+
 def prime_state(tolerance_pct=1.0):
     candidates = load_candidates()
     state = {}
@@ -549,6 +810,7 @@ def prime_state(tolerance_pct=1.0):
             "overshoot_logged": False,
             "expired_logged": False,
             "last_decision": decision,
+            "activation_state": "NAO_INICIADO",
         }
 
         par = str(row["Par"]).strip().upper()
@@ -573,6 +835,9 @@ def prime_state(tolerance_pct=1.0):
             elif dist_abs <= tolerance_pct:
                 rec["prealert_sent"] = True
                 near_count += 1
+
+        if rec.get("ready_sent", False):
+            rec["activation_state"] = "LEGACY_READY"
 
         state[key] = rec
 
@@ -605,6 +870,8 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         "setups_expirados": 0,
         "gatilho_ultrapassado": 0,
         "bybit_invalidos": 0,
+        "gatilhos_bot_atingidos": 0,
+        "setups_sem_ativacao": 0,
     }
 
     for _, row in candidates.iterrows():
@@ -619,8 +886,17 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             "overshoot_logged": False,
             "expired_logged": False,
             "last_decision": decision,
+            "activation_state": "NAO_INICIADO",
         })
         rec["last_decision"] = decision
+
+        if "activation_state" not in rec:
+            rec["activation_state"] = (
+                "LEGACY_READY"
+                if rec.get("ready_sent", False)
+                else "NAO_INICIADO"
+            )
+            changed = True
 
         ticker = get_ticker(par)
         last = _float(ticker.get("lastPrice"), 0.0)
@@ -631,6 +907,31 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         )
 
         if not last or not gat:
+            continue
+
+        if rec.get("activation_state") == "AGUARDANDO_ATIVACAO":
+            if decision == "GRID":
+                stats["grid"] += 1
+            elif decision == "AGUARDAR_GATILHO":
+                stats["aguardando"] += 1
+
+            lifecycle_changed, lifecycle_event = process_activation_watch(
+                row,
+                rec,
+                cfg,
+                current_price=last,
+                dry_run=dry_run,
+                verbose=verbose,
+            )
+
+            if lifecycle_changed:
+                changed = True
+
+            if lifecycle_event == "GATILHO_ATINGIDO":
+                stats["gatilhos_bot_atingidos"] += 1
+            elif lifecycle_event == "SETUP_ENCERRADO_SEM_ATIVACAO":
+                stats["setups_sem_ativacao"] += 1
+
             continue
 
         if decision == "AGUARDAR_GATILHO":
@@ -846,6 +1147,12 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             rec["ready_sent"] = True
             rec["ready_price"] = last
             rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
+            _start_activation_watch(
+                rec,
+                row,
+                effective_trigger,
+                technical_info=technical_info,
+            )
             stats["prontos"] += 1
             changed = True
             log_monitor_event(
@@ -860,7 +1167,44 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             )
 
     stale = [k for k in state if k not in active_keys]
+
     for k in stale:
+        stale_rec = state.get(k, {})
+
+        if stale_rec.get("activation_state") == "AGUARDANDO_ATIVACAO":
+            snapshot = stale_rec.get("activation_row") or {}
+
+            if snapshot:
+                stale_row = pd.Series(snapshot)
+                stale_par = str(snapshot.get("Par", "")).strip().upper()
+
+                try:
+                    stale_ticker = get_ticker(stale_par)
+                    stale_last = _float(stale_ticker.get("lastPrice"), 0.0)
+                except Exception:
+                    stale_last = 0.0
+
+                if stale_last:
+                    lifecycle_changed, lifecycle_event = process_activation_watch(
+                        stale_row,
+                        stale_rec,
+                        cfg,
+                        current_price=stale_last,
+                        dry_run=dry_run,
+                        verbose=verbose,
+                    )
+
+                    if lifecycle_changed:
+                        changed = True
+
+                    if lifecycle_event == "GATILHO_ATINGIDO":
+                        stats["gatilhos_bot_atingidos"] += 1
+                    elif lifecycle_event == "SETUP_ENCERRADO_SEM_ATIVACAO":
+                        stats["setups_sem_ativacao"] += 1
+
+            if stale_rec.get("activation_state") == "AGUARDANDO_ATIVACAO":
+                continue
+
         del state[k]
         changed = True
 
@@ -880,14 +1224,16 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             f"tecnico_bloq={stats['bloqueados_tecnico']} "
             f"setup_expirado={stats['setups_expirados']} "
             f"gatilho_ultrapassado={stats['gatilho_ultrapassado']} "
-            f"bybit_invalidos={stats['bybit_invalidos']}"
+            f"bybit_invalidos={stats['bybit_invalidos']} "
+            f"bot_gatilho_atingido={stats['gatilhos_bot_atingidos']} "
+            f"bot_setup_sem_ativacao={stats['setups_sem_ativacao']}"
         )
 
     return stats
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.0.2")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.1.0")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
