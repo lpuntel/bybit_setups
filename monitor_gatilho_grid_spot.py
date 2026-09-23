@@ -1239,14 +1239,43 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         if k in state and state[k].get("priority_slot_active", False)
     }
 
+    def _selected_score(rec):
+        return _float(rec.get("priority_score"), 0.0) or 0.0
+
+    # Reaplica os limites sempre que capital/MAX_POR_PAR mudarem.
+    by_par = {}
+    for k, r in selected.items():
+        p = str(r.get("par", "")).upper()
+        by_par.setdefault(p, []).append((k, r))
+
+    for p, items in by_par.items():
+        items.sort(key=lambda kv: _selected_score(kv[1]), reverse=True)
+        for k, r in items[max_per_par:]:
+            r["priority_slot_active"] = False
+            r["priority_left_reason"] = "limite_max_por_par_reduzido"
+            selected.pop(k, None)
+            changed = True
+
+    if len(selected) > capacity:
+        keep = {
+            k for k, _ in sorted(
+                selected.items(),
+                key=lambda kv: _selected_score(kv[1]),
+                reverse=True,
+            )[:capacity]
+        }
+        for k in list(selected):
+            if k not in keep:
+                selected[k]["priority_slot_active"] = False
+                selected[k]["priority_left_reason"] = "capacidade_reduzida"
+                selected.pop(k, None)
+                changed = True
+
     par_counts = {}
     for r in selected.values():
         p = str(r.get("par", "")).upper()
         if p:
             par_counts[p] = par_counts.get(p, 0) + 1
-
-    def _selected_score(rec):
-        return _float(rec.get("priority_score"), 0.0) or 0.0
 
     for item in sorted(ready_queue, key=_priority_sort_key):
         row = item["row"]
@@ -1306,33 +1335,12 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                 )
             continue
 
-        if replace_key is not None:
-            replaced = selected.pop(replace_key)
-            replaced_par = str(replaced.get("par", "")).upper()
-            replaced["priority_slot_active"] = False
-            replaced["priority_replaced_by"] = item["key"]
-            replaced["priority_left_reason"] = "substituido_por_score_superior"
-            par_counts[replaced_par] = max(
-                0,
-                par_counts.get(replaced_par, 0) - 1,
-            )
-            changed = True
-
-            log_monitor_event(
-                "GRID_SHORTLIST_REPLACEMENT",
-                row,
-                current_price=item["last"],
-                info=item["technical_info"],
-                extra={
-                    "score_total": score,
-                    "replaced_key": replace_key,
-                    "replaced_score": _selected_score(replaced),
-                    "capacity": capacity,
-                },
-            )
-
+        selected_for_rank = {
+            k: r for k, r in selected.items()
+            if k != replace_key
+        }
         priority_rank = 1 + sum(
-            1 for r in selected.values()
+            1 for r in selected_for_rank.values()
             if _selected_score(r) > score
         )
         item["technical_info"]["priority_rank"] = priority_rank
@@ -1348,6 +1356,30 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             ),
             dry_run=dry_run,
         ):
+            if replace_key is not None:
+                replaced = selected.pop(replace_key)
+                replaced_par = str(replaced.get("par", "")).upper()
+                replaced["priority_slot_active"] = False
+                replaced["priority_replaced_by"] = item["key"]
+                replaced["priority_left_reason"] = "substituido_por_score_superior"
+                par_counts[replaced_par] = max(
+                    0,
+                    par_counts.get(replaced_par, 0) - 1,
+                )
+
+                log_monitor_event(
+                    "GRID_SHORTLIST_REPLACEMENT",
+                    row,
+                    current_price=item["last"],
+                    info=item["technical_info"],
+                    extra={
+                        "score_total": score,
+                        "replaced_key": replace_key,
+                        "replaced_score": _selected_score(replaced),
+                        "capacity": capacity,
+                    },
+                )
+
             rec["ready_sent"] = True
             rec["ready_price"] = item["last"]
             rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
