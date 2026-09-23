@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.1.0
+# Monitor Spot Grid v3.2.0
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -157,6 +157,25 @@ def send(text, dry_run=False):
     )
     r.raise_for_status()
     return True
+
+
+def _operational_capacity(cfg) -> int:
+    capital = _float(getattr(cfg, "capital_disponivel_usdt", 0.0), 0.0) or 0.0
+    reference = _float(getattr(cfg, "capital_referencia_usdt", 0.0), 0.0) or 0.0
+    if capital <= 0 or reference <= 0:
+        return 0
+    return max(0, int(capital // reference))
+
+
+def _priority_sort_key(item):
+    row = item["row"]
+    return (
+        -(_float(row.get("SCORE_TOTAL"), 0.0) or 0.0),
+        -(_float(row.get("SCORE_LIQUIDEZ"), 0.0) or 0.0),
+        -(_float(row.get("SCORE_FORCA"), 0.0) or 0.0),
+        str(row.get("Par", "")),
+        str(row.get("Timeframe", "")),
+    )
 
 
 def load_candidates():
@@ -872,7 +891,12 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         "bybit_invalidos": 0,
         "gatilhos_bot_atingidos": 0,
         "setups_sem_ativacao": 0,
+        "prontos_deferidos_prioridade": 0,
+        "slots_capital": _operational_capacity(cfg),
+        "slots_ocupados": 0,
     }
+
+    ready_queue = []
 
     for _, row in candidates.iterrows():
         par = str(row["Par"]).strip().upper()
@@ -889,6 +913,16 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             "activation_state": "NAO_INICIADO",
         })
         rec["last_decision"] = decision
+        rec["par"] = par
+        rec["timeframe"] = str(row.get("Timeframe", ""))
+        rec["setup"] = str(row.get("Setup", ""))
+
+        if "priority_slot_active" not in rec:
+            rec["priority_slot_active"] = False
+            changed = True
+        if "priority_deferred_logged" not in rec:
+            rec["priority_deferred_logged"] = False
+            changed = True
 
         if "activation_state" not in rec:
             rec["activation_state"] = (
@@ -908,6 +942,13 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
         if not last or not gat:
             continue
+
+        if (
+            not getattr(cfg, "bot_watch_automatico", False)
+            and rec.get("activation_state") == "AGUARDANDO_ATIVACAO"
+        ):
+            rec["activation_state"] = "LEGACY_READY"
+            changed = True
 
         if rec.get("activation_state") == "AGUARDANDO_ATIVACAO":
             if decision == "GRID":
@@ -982,15 +1023,27 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                     if rec.get("expired_logged", False):
                         rec["expired_logged"] = False
                         changed = True
-                    if send(
-                        build_near_message(row, last, dist_abs, pre_info),
-                        dry_run=dry_run,
-                    ):
+
+                    if getattr(cfg, "prealert_telegram", False):
+                        if send(
+                            build_near_message(row, last, dist_abs, pre_info),
+                            dry_run=dry_run,
+                        ):
+                            rec["prealert_sent"] = True
+                            stats["prealertas"] += 1
+                            changed = True
+                            log_monitor_event(
+                                "PREALERT_SENT",
+                                row,
+                                current_price=last,
+                                info=pre_info,
+                                extra={"distance_pct": dist_abs},
+                            )
+                    else:
                         rec["prealert_sent"] = True
-                        stats["prealertas"] += 1
                         changed = True
                         log_monitor_event(
-                            "PREALERT_SENT",
+                            "PREALERT_SUPPRESSED",
                             row,
                             current_price=last,
                             info=pre_info,
@@ -1140,29 +1193,111 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                 )
             continue
 
+        ready_queue.append({
+            "key": key,
+            "row": row.copy(),
+            "rec": rec,
+            "last": last,
+            "ctx": ctx,
+            "grid": grid,
+            "technical_info": technical_info,
+            "effective_trigger": effective_trigger,
+        })
+
+    capacity = _operational_capacity(cfg)
+    max_per_par = max(1, int(getattr(cfg, "max_por_par", 1) or 1))
+
+    occupied_records = [
+        state[k]
+        for k in active_keys
+        if k in state and state[k].get("priority_slot_active", False)
+    ]
+    occupied = len(occupied_records)
+    stats["slots_ocupados"] = occupied
+    available_slots = max(0, capacity - occupied)
+
+    par_counts = {}
+    for r in occupied_records:
+        p = str(r.get("par", "")).upper()
+        if p:
+            par_counts[p] = par_counts.get(p, 0) + 1
+
+    for item in sorted(ready_queue, key=_priority_sort_key):
+        row = item["row"]
+        rec = item["rec"]
+        par = str(row.get("Par", "")).upper()
+
+        can_send = (
+            available_slots > 0
+            and par_counts.get(par, 0) < max_per_par
+        )
+
+        if not can_send:
+            stats["prontos_deferidos_prioridade"] += 1
+            if not rec.get("priority_deferred_logged", False):
+                rec["priority_deferred_logged"] = True
+                changed = True
+                log_monitor_event(
+                    "GRID_READY_DEFERRED_PRIORITY",
+                    row,
+                    current_price=item["last"],
+                    info=item["technical_info"],
+                    extra={
+                        "score_total": _float(row.get("SCORE_TOTAL")),
+                        "capacity": capacity,
+                        "occupied": occupied,
+                        "max_por_par": max_per_par,
+                    },
+                )
+            continue
+
         if send(
-            build_ready_message(row, last, ctx, grid, technical_info),
+            build_ready_message(
+                row,
+                item["last"],
+                item["ctx"],
+                item["grid"],
+                item["technical_info"],
+            ),
             dry_run=dry_run,
         ):
             rec["ready_sent"] = True
-            rec["ready_price"] = last
+            rec["ready_price"] = item["last"]
             rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
-            _start_activation_watch(
-                rec,
-                row,
-                effective_trigger,
-                technical_info=technical_info,
-            )
+            rec["priority_slot_active"] = True
+            rec["priority_deferred_logged"] = False
+
+            if getattr(cfg, "bot_watch_automatico", False):
+                _start_activation_watch(
+                    rec,
+                    row,
+                    item["effective_trigger"],
+                    technical_info=item["technical_info"],
+                )
+            else:
+                rec["activation_state"] = "NAO_INICIADO"
+
             stats["prontos"] += 1
+            available_slots -= 1
+            par_counts[par] = par_counts.get(par, 0) + 1
             changed = True
+
             log_monitor_event(
                 "GRID_READY",
                 row,
-                current_price=last,
-                info=technical_info,
+                current_price=item["last"],
+                info=item["technical_info"],
                 extra={
-                    "spread_pct": ctx.get("Spread_Pct"),
-                    "depth_1pct": ctx.get("DepthMin1Pct"),
+                    "spread_pct": item["ctx"].get("Spread_Pct"),
+                    "depth_1pct": item["ctx"].get("DepthMin1Pct"),
+                    "score_total": _float(row.get("SCORE_TOTAL")),
+                    "capital_disponivel_usdt": _float(
+                        getattr(cfg, "capital_disponivel_usdt", 0.0)
+                    ),
+                    "capital_referencia_usdt": _float(
+                        getattr(cfg, "capital_referencia_usdt", 0.0)
+                    ),
+                    "capacity": capacity,
                 },
             )
 
@@ -1226,14 +1361,16 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             f"gatilho_ultrapassado={stats['gatilho_ultrapassado']} "
             f"bybit_invalidos={stats['bybit_invalidos']} "
             f"bot_gatilho_atingido={stats['gatilhos_bot_atingidos']} "
-            f"bot_setup_sem_ativacao={stats['setups_sem_ativacao']}"
+            f"bot_setup_sem_ativacao={stats['setups_sem_ativacao']} "
+            f"grid_deferidos={stats['prontos_deferidos_prioridade']} "
+            f"slots={stats['slots_ocupados']}/{stats['slots_capital']}"
         )
 
     return stats
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.1.0")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.2.0")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
