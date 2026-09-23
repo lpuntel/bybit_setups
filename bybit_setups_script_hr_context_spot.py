@@ -123,6 +123,13 @@ class SpotContextConfig:
     trailing_up_steps: int = 3
     tp_extra_grids: int = 1
 
+    # Priorização operacional / Telegram
+    capital_disponivel_usdt: float = 300.0
+    capital_referencia_usdt: float = 50.0
+    max_por_par: int = 1
+    prealert_telegram: bool = False
+    bot_watch_automatico: bool = False
+
     # Rotina
     api_sleep_s: float = 0.08
     enviar_telegram: bool = False
@@ -233,6 +240,11 @@ ALIASES = {
     "SL_BUFFER_TICKS": "sl_buffer_ticks",
     "TRAILING_UP_STEPS": "trailing_up_steps",
     "TP_EXTRA_GRIDS": "tp_extra_grids",
+    "CAPITAL_DISPONIVEL_USDT": "capital_disponivel_usdt",
+    "CAPITAL_REFERENCIA_USDT": "capital_referencia_usdt",
+    "MAX_POR_PAR": "max_por_par",
+    "PREALERT_TELEGRAM": "prealert_telegram",
+    "BOT_WATCH_AUTOMATICO": "bot_watch_automatico",
     "ENVIAR_TELEGRAM": "enviar_telegram",
     "UPLOAD_DRIVE": "upload_drive",
 }
