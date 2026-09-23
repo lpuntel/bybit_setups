@@ -519,8 +519,19 @@ def build_ready_message(row, last, ctx, grid, technical_info):
         else "Trailing Up: NÃO"
     )
 
+    priority_rank = technical_info.get("priority_rank")
+    priority_capacity = technical_info.get("priority_capacity")
+    score_total = _float(row.get("SCORE_TOTAL"))
+    priority_line = (
+        f"Prioridade: {priority_rank}/{priority_capacity} | "
+        f"Score: {score_total:.1f}\n"
+        if priority_rank is not None and priority_capacity is not None and score_total is not None
+        else ""
+    )
+
     return (
         f"GRID PRONTO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
+        f"{priority_line}"
         f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
         f"\nFAIXA INICIAL / GRID\n"
         f"Lower: {_fmt_price(grid.get('LOWER'))} | Upper: {_fmt_price(grid.get('UPPER'))}\n"
@@ -1222,6 +1233,8 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         if p:
             par_counts[p] = par_counts.get(p, 0) + 1
 
+    priority_position = occupied
+
     for item in sorted(ready_queue, key=_priority_sort_key):
         row = item["row"]
         rec = item["rec"]
@@ -1250,6 +1263,10 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                     },
                 )
             continue
+
+        priority_position += 1
+        item["technical_info"]["priority_rank"] = priority_position
+        item["technical_info"]["priority_capacity"] = capacity
 
         if send(
             build_ready_message(
@@ -1305,6 +1322,13 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
     for k in stale:
         stale_rec = state.get(k, {})
+
+        if (
+            not getattr(cfg, "bot_watch_automatico", False)
+            and stale_rec.get("activation_state") == "AGUARDANDO_ATIVACAO"
+        ):
+            stale_rec["activation_state"] = "LEGACY_READY"
+            changed = True
 
         if stale_rec.get("activation_state") == "AGUARDANDO_ATIVACAO":
             snapshot = stale_rec.get("activation_row") or {}
