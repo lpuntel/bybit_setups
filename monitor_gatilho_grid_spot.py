@@ -935,6 +935,12 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             rec["priority_deferred_logged"] = False
             changed = True
 
+        score_now = _float(row.get("SCORE_TOTAL"), 0.0) or 0.0
+        if rec.get("priority_slot_active", False):
+            if rec.get("priority_score") != score_now:
+                rec["priority_score"] = score_now
+                changed = True
+
         if "activation_state" not in rec:
             rec["activation_state"] = (
                 "LEGACY_READY"
@@ -953,6 +959,15 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
         if not last or not gat:
             continue
+
+        if (
+            decision == "AGUARDAR_GATILHO"
+            and last < gat
+            and rec.get("priority_slot_active", False)
+        ):
+            rec["priority_slot_active"] = False
+            rec["priority_left_reason"] = "voltou_abaixo_gatilho"
+            changed = True
 
         if (
             not getattr(cfg, "bot_watch_automatico", False)
@@ -1218,32 +1233,88 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
     capacity = _operational_capacity(cfg)
     max_per_par = max(1, int(getattr(cfg, "max_por_par", 1) or 1))
 
-    occupied_records = [
-        state[k]
+    selected = {
+        k: state[k]
         for k in active_keys
         if k in state and state[k].get("priority_slot_active", False)
-    ]
-    occupied = len(occupied_records)
-    stats["slots_ocupados"] = occupied
-    available_slots = max(0, capacity - occupied)
+    }
+
+    def _selected_score(rec):
+        return _float(rec.get("priority_score"), 0.0) or 0.0
+
+    # Reaplica os limites sempre que capital/MAX_POR_PAR mudarem.
+    by_par = {}
+    for k, r in selected.items():
+        p = str(r.get("par", "")).upper()
+        by_par.setdefault(p, []).append((k, r))
+
+    for p, items in by_par.items():
+        items.sort(key=lambda kv: _selected_score(kv[1]), reverse=True)
+        for k, r in items[max_per_par:]:
+            r["priority_slot_active"] = False
+            r["priority_left_reason"] = "limite_max_por_par_reduzido"
+            selected.pop(k, None)
+            changed = True
+
+    if len(selected) > capacity:
+        keep = {
+            k for k, _ in sorted(
+                selected.items(),
+                key=lambda kv: _selected_score(kv[1]),
+                reverse=True,
+            )[:capacity]
+        }
+        for k in list(selected):
+            if k not in keep:
+                selected[k]["priority_slot_active"] = False
+                selected[k]["priority_left_reason"] = "capacidade_reduzida"
+                selected.pop(k, None)
+                changed = True
 
     par_counts = {}
-    for r in occupied_records:
+    for r in selected.values():
         p = str(r.get("par", "")).upper()
         if p:
             par_counts[p] = par_counts.get(p, 0) + 1
-
-    priority_position = occupied
 
     for item in sorted(ready_queue, key=_priority_sort_key):
         row = item["row"]
         rec = item["rec"]
         par = str(row.get("Par", "")).upper()
+        score = _float(row.get("SCORE_TOTAL"), 0.0) or 0.0
+        replace_key = None
 
-        can_send = (
-            available_slots > 0
-            and par_counts.get(par, 0) < max_per_par
-        )
+        if capacity <= 0:
+            can_send = False
+        else:
+            same_par = [
+                (k, r)
+                for k, r in selected.items()
+                if str(r.get("par", "")).upper() == par
+            ]
+
+            if len(same_par) >= max_per_par:
+                worst_same_key, worst_same = min(
+                    same_par,
+                    key=lambda kv: _selected_score(kv[1]),
+                )
+                if score > _selected_score(worst_same):
+                    replace_key = worst_same_key
+                    can_send = True
+                else:
+                    can_send = False
+            elif len(selected) < capacity:
+                can_send = True
+            else:
+                worst_key, worst_rec = min(
+                    selected.items(),
+                    key=lambda kv: _selected_score(kv[1]),
+                )
+                if score > _selected_score(worst_rec):
+                    replace_key = worst_key
+                    can_send = True
+                else:
+                    can_send = False
 
         if not can_send:
             stats["prontos_deferidos_prioridade"] += 1
@@ -1256,16 +1327,23 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                     current_price=item["last"],
                     info=item["technical_info"],
                     extra={
-                        "score_total": _float(row.get("SCORE_TOTAL")),
+                        "score_total": score,
                         "capacity": capacity,
-                        "occupied": occupied,
+                        "shortlist_ativa": len(selected),
                         "max_por_par": max_per_par,
                     },
                 )
             continue
 
-        priority_position += 1
-        item["technical_info"]["priority_rank"] = priority_position
+        selected_for_rank = {
+            k: r for k, r in selected.items()
+            if k != replace_key
+        }
+        priority_rank = 1 + sum(
+            1 for r in selected_for_rank.values()
+            if _selected_score(r) > score
+        )
+        item["technical_info"]["priority_rank"] = priority_rank
         item["technical_info"]["priority_capacity"] = capacity
 
         if send(
@@ -1278,11 +1356,38 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             ),
             dry_run=dry_run,
         ):
+            if replace_key is not None:
+                replaced = selected.pop(replace_key)
+                replaced_par = str(replaced.get("par", "")).upper()
+                replaced["priority_slot_active"] = False
+                replaced["priority_replaced_by"] = item["key"]
+                replaced["priority_left_reason"] = "substituido_por_score_superior"
+                par_counts[replaced_par] = max(
+                    0,
+                    par_counts.get(replaced_par, 0) - 1,
+                )
+
+                log_monitor_event(
+                    "GRID_SHORTLIST_REPLACEMENT",
+                    row,
+                    current_price=item["last"],
+                    info=item["technical_info"],
+                    extra={
+                        "score_total": score,
+                        "replaced_key": replace_key,
+                        "replaced_score": _selected_score(replaced),
+                        "capacity": capacity,
+                    },
+                )
+
             rec["ready_sent"] = True
             rec["ready_price"] = item["last"]
             rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
             rec["priority_slot_active"] = True
+            rec["priority_score"] = score
+            rec["priority_selected_at"] = pd.Timestamp.utcnow().isoformat()
             rec["priority_deferred_logged"] = False
+            selected[item["key"]] = rec
 
             if getattr(cfg, "bot_watch_automatico", False):
                 _start_activation_watch(
@@ -1295,7 +1400,6 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                 rec["activation_state"] = "NAO_INICIADO"
 
             stats["prontos"] += 1
-            available_slots -= 1
             par_counts[par] = par_counts.get(par, 0) + 1
             changed = True
 
@@ -1317,6 +1421,8 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                     "capacity": capacity,
                 },
             )
+
+    stats["slots_ocupados"] = len(selected)
 
     stale = [k for k in state if k not in active_keys]
 
@@ -1387,7 +1493,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             f"bot_gatilho_atingido={stats['gatilhos_bot_atingidos']} "
             f"bot_setup_sem_ativacao={stats['setups_sem_ativacao']} "
             f"grid_deferidos={stats['prontos_deferidos_prioridade']} "
-            f"slots={stats['slots_ocupados']}/{stats['slots_capital']}"
+            f"shortlist={stats['slots_ocupados']}/{stats['slots_capital']}"
         )
 
     return stats
