@@ -1,9 +1,10 @@
-# Monitor Spot Grid v3.2.0
+# Monitor Spot Grid v3.3.0
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -32,6 +33,7 @@ load_dotenv(BASE_DIR / ".env")
 
 SCAN_FILE = BASE_DIR / "ativos_opt_hr_contexto_spot.xlsx"
 STATE_FILE = BASE_DIR / "monitor_gatilho_grid_spot_state.json"
+CALLBACK_STATE_FILE = BASE_DIR / "monitor_gatilho_grid_spot_callback_state.json"
 SHEET = "Setups Spot"
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -138,11 +140,39 @@ def candidate_key(row):
     ])
 
 
-def send(text, dry_run=False):
+def _callback_token(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_callback_cursor() -> int | None:
+    if not CALLBACK_STATE_FILE.exists():
+        return None
+    try:
+        data = json.loads(CALLBACK_STATE_FILE.read_text(encoding="utf-8"))
+        value = data.get("next_update_id")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _save_callback_cursor(next_update_id: int):
+    tmp = CALLBACK_STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps({"next_update_id": int(next_update_id)}, indent=2),
+        encoding="utf-8",
+    )
+    tmp.replace(CALLBACK_STATE_FILE)
+
+
+def send(text, dry_run=False, reply_markup=None, return_result=False):
     if dry_run:
         print("\n--- TELEGRAM DRY-RUN ---")
         print(text)
+        if reply_markup:
+            print("[BOTÃO] ✅ TRATADO")
         print("--- FIM ---")
+        if return_result:
+            return {"message_id": None}
         return True
 
     if not TOKEN or not CHAT_ID:
@@ -150,13 +180,195 @@ def send(text, dry_run=False):
         print(text)
         return False
 
+    data = {"chat_id": CHAT_ID, "text": text}
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": text},
+        data=data,
         timeout=20,
     )
     r.raise_for_status()
+    payload = r.json()
+    result = payload.get("result") or {}
+
+    if return_result:
+        return result
     return True
+
+
+def _answer_callback(callback_query_id: str, text: str):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery",
+            data={
+                "callback_query_id": callback_query_id,
+                "text": text,
+                "show_alert": "false",
+            },
+            timeout=20,
+        ).raise_for_status()
+    except Exception as exc:
+        print(f"[TG CALLBACK] Falha ao responder callback: {exc}")
+
+
+def _delete_telegram_message(chat_id, message_id) -> tuple[bool, str | None]:
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/deleteMessage",
+            data={"chat_id": chat_id, "message_id": message_id},
+            timeout=20,
+        )
+        if r.ok:
+            return True, None
+        return False, r.text[:500]
+    except Exception as exc:
+        return False, str(exc)
+
+
+def process_telegram_callbacks(verbose=True):
+    """
+    Processa somente callbacks do botão TRATADO.
+    Não executa nem altera ordens; apenas registra o alerta como tratado
+    e tenta apagar a própria mensagem enviada pelo bot.
+    """
+    if not TOKEN or not CHAT_ID:
+        return 0
+
+    params = {
+        "timeout": 0,
+        "allowed_updates": json.dumps(["callback_query"]),
+    }
+    offset = _load_callback_cursor()
+    if offset is not None:
+        params["offset"] = offset
+
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/getUpdates",
+            params=params,
+            timeout=20,
+        )
+        r.raise_for_status()
+        updates = (r.json() or {}).get("result") or []
+    except Exception as exc:
+        if verbose:
+            print(f"[TG CALLBACK] ERRO getUpdates: {exc}")
+        return 0
+
+    if not updates:
+        return 0
+
+    state = load_state()
+    changed = False
+    handled_count = 0
+    next_update_id = offset
+
+    for update in updates:
+        update_id = update.get("update_id")
+        if update_id is not None:
+            candidate_next = int(update_id) + 1
+            next_update_id = (
+                candidate_next
+                if next_update_id is None
+                else max(next_update_id, candidate_next)
+            )
+
+        callback = update.get("callback_query") or {}
+        callback_id = str(callback.get("id") or "")
+        data = str(callback.get("data") or "")
+        message = callback.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+
+        if not data.startswith("handled:"):
+            if callback_id:
+                _answer_callback(callback_id, "Ação não reconhecida.")
+            continue
+
+        if str(chat_id) != str(CHAT_ID):
+            if callback_id:
+                _answer_callback(callback_id, "Ação não autorizada.")
+            continue
+
+        token = data.split(":", 1)[1].strip()
+        matched_key = None
+        matched_rec = None
+
+        for key, rec in state.items():
+            if not isinstance(rec, dict):
+                continue
+            if (
+                rec.get("telegram_callback_token") == token
+                and str(rec.get("telegram_message_id")) == str(message_id)
+            ):
+                matched_key = key
+                matched_rec = rec
+                break
+
+        if matched_rec is None:
+            if callback_id:
+                _answer_callback(callback_id, "Alerta antigo ou não localizado.")
+            continue
+
+        if matched_rec.get("handled", False):
+            if callback_id:
+                _answer_callback(callback_id, "Este alerta já foi tratado.")
+            continue
+
+        matched_rec["handled"] = True
+        matched_rec["handled_at"] = pd.Timestamp.utcnow().isoformat()
+        matched_rec["handled_source"] = "telegram_button"
+
+        deleted, delete_error = _delete_telegram_message(chat_id, message_id)
+        matched_rec["telegram_message_deleted"] = bool(deleted)
+        if delete_error:
+            matched_rec["telegram_delete_error"] = delete_error
+        else:
+            matched_rec.pop("telegram_delete_error", None)
+
+        state[matched_key] = matched_rec
+        changed = True
+        handled_count += 1
+
+        log_monitor_event(
+            "GRID_READY_HANDLED",
+            {
+                "Par": matched_rec.get("par"),
+                "Timeframe": matched_rec.get("timeframe"),
+                "Setup": matched_rec.get("setup"),
+            },
+            current_price=matched_rec.get("ready_price"),
+            extra={
+                "candidate_key": matched_key,
+                "telegram_message_id": message_id,
+                "telegram_deleted": bool(deleted),
+                "delete_error": delete_error,
+            },
+        )
+
+        if callback_id:
+            _answer_callback(
+                callback_id,
+                "Tratado e removido." if deleted else "Tratado; não consegui apagar a mensagem.",
+            )
+
+        if verbose:
+            status = "apagada" if deleted else "mantida"
+            print(
+                f"[TG CALLBACK] {matched_rec.get('par')} "
+                f"{matched_rec.get('timeframe')} marcado TRATADO | mensagem {status}"
+            )
+
+    if changed:
+        save_state(state)
+
+    if next_update_id is not None:
+        _save_callback_cursor(next_update_id)
+
+    return handled_count
 
 
 def _operational_capacity(cfg) -> int:
@@ -935,6 +1147,9 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         if "dynamic_waiting" not in rec:
             rec["dynamic_waiting"] = False
             changed = True
+        if "handled" not in rec:
+            rec["handled"] = False
+            changed = True
 
         score_now = _float(row.get("SCORE_TOTAL"), 0.0) or 0.0
         if rec.get("priority_slot_active", False):
@@ -1356,7 +1571,17 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                 )
             continue
 
-        if send(
+        callback_token = _callback_token(key)
+        reply_markup = {
+            "inline_keyboard": [[
+                {
+                    "text": "✅ TRATADO",
+                    "callback_data": f"handled:{callback_token}",
+                }
+            ]]
+        }
+
+        send_result = send(
             build_ready_message(
                 row,
                 item["last"],
@@ -1365,8 +1590,16 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
                 item["technical_info"],
             ),
             dry_run=dry_run,
-        ):
+            reply_markup=reply_markup,
+            return_result=True,
+        )
+
+        if send_result:
             rec["ready_sent"] = True
+            rec["handled"] = False
+            rec["handled_at"] = None
+            rec["telegram_callback_token"] = callback_token
+            rec["telegram_message_id"] = send_result.get("message_id")
             rec["ready_price"] = item["last"]
             rec["ready_at"] = pd.Timestamp.utcnow().isoformat()
             rec["priority_slot_active"] = True
@@ -1490,7 +1723,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.2.0")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.3.0")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
@@ -1513,6 +1746,8 @@ if __name__ == "__main__":
     else:
         while True:
             try:
+                if not a.dry_run:
+                    process_telegram_callbacks(verbose=not a.quiet)
                 once(
                     tolerance_pct=a.tolerance_pct,
                     dry_run=a.dry_run,

@@ -14,3 +14,6 @@ patch_*.py
 
 # Logs passivos de pesquisa
 research_logs/
+# Estado local do monitor Spot
+monitor_gatilho_grid_spot_state.json
+monitor_gatilho_grid_spot_callback_state.json
