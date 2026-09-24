@@ -346,14 +346,12 @@ def technical_revalidation(row, cfg, current_price=None):
         else:
             reasons.append("low_setup_atual_nao_localizado")
 
-        if status.startswith("ARMAR") and current_price is not None:
-            if current_price < trigger_now:
-                if not (
-                    decision == "AGUARDAR_GATILHO"
-                    and original_trigger is not None
-                    and current_price < original_trigger
-                ):
-                    reasons.append("novo_gatilho_nao_atingido")
+        if (
+            status.startswith("ARMAR")
+            and current_price is not None
+            and current_price < trigger_now
+        ):
+            warnings.append("novo_gatilho_aguardando")
 
     if (
         effective_low_setup is not None
@@ -370,8 +368,7 @@ def technical_revalidation(row, cfg, current_price=None):
         reasons.append("low_setup_rompido")
 
     waiting_effective = (
-        decision == "AGUARDAR_GATILHO"
-        and current_price is not None
+        current_price is not None
         and effective_trigger is not None
         and current_price < effective_trigger
     )
@@ -892,6 +889,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
         "candidatos": len(candidates),
         "grid": 0,
         "aguardando": 0,
+        "aguardando_efetivo": 0,
         "prealertas": 0,
         "prealertas_bloq_tecnico": 0,
         "prontos": 0,
@@ -933,6 +931,9 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             changed = True
         if "priority_deferred_logged" not in rec:
             rec["priority_deferred_logged"] = False
+            changed = True
+        if "dynamic_waiting" not in rec:
+            rec["dynamic_waiting"] = False
             changed = True
 
         score_now = _float(row.get("SCORE_TOTAL"), 0.0) or 0.0
@@ -1083,14 +1084,28 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             stats["grid"] += 1
 
             if not _bool(row.get("PARAMETROS_BYBIT_VALIDOS")):
-                stats["bybit_invalidos"] += 1
-                log_monitor_event(
-                    "SCAN_PARAMS_INVALID",
-                    row,
-                    current_price=last,
-                    reasons=[str(row.get("PARAMETROS_BYBIT_MOTIVO", ""))],
-                )
-                continue
+                scan_reason = str(
+                    row.get("PARAMETROS_BYBIT_MOTIVO", "")
+                ).strip()
+                scan_reasons = {
+                    r.strip()
+                    for r in scan_reason.split(";")
+                    if r.strip()
+                }
+
+                # "entry_acima_mercado" é condição temporal:
+                # o setup já disparou, mas o preço recuou abaixo do gatilho.
+                # O monitor deve revalidar ao vivo e, se o setup continuar
+                # válido, tratá-lo como aguardando gatilho.
+                if scan_reasons != {"entry_acima_mercado"}:
+                    stats["bybit_invalidos"] += 1
+                    log_monitor_event(
+                        "SCAN_PARAMS_INVALID",
+                        row,
+                        current_price=last,
+                        reasons=[scan_reason],
+                    )
+                    continue
         else:
             continue
 
@@ -1151,6 +1166,34 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
         if rec.get("expired_logged", False):
             rec["expired_logged"] = False
+            changed = True
+
+        if technical_info.get("technical_state") == "AGUARDANDO_GATILHO":
+            stats["aguardando_efetivo"] += 1
+
+            if rec.get("priority_slot_active", False):
+                rec["priority_slot_active"] = False
+                rec["priority_left_reason"] = "preco_abaixo_gatilho_efetivo"
+                changed = True
+
+            if not rec.get("dynamic_waiting", False):
+                rec["dynamic_waiting"] = True
+                changed = True
+                log_monitor_event(
+                    "GRID_DYNAMIC_WAITING",
+                    row,
+                    current_price=last,
+                    info=technical_info,
+                    extra={
+                        "gatilho_efetivo": technical_info.get("gatilho_atual"),
+                        "motivo": "preco_abaixo_gatilho_efetivo",
+                    },
+                )
+
+            continue
+
+        if rec.get("dynamic_waiting", False):
+            rec["dynamic_waiting"] = False
             changed = True
 
         effective_trigger = _float(
@@ -1428,6 +1471,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
             f"candidatos={stats['candidatos']} "
             f"grid={stats['grid']} "
             f"aguardando={stats['aguardando']} "
+            f"aguardando_efetivo={stats['aguardando_efetivo']} "
             f"prealertas={stats['prealertas']} "
             f"prealert_tecnico_bloq={stats['prealertas_bloq_tecnico']} "
             f"prontos={stats['prontos']} "
