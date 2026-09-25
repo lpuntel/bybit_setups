@@ -126,6 +126,7 @@ class SpotContextConfig:
     # Priorização operacional / Telegram
     capital_disponivel_usdt: float = 300.0
     capital_referencia_usdt: float = 50.0
+    capital_grid_buffer_pct: float = 20.0
     max_por_par: int = 1
     prealert_telegram: bool = False
     bot_watch_automatico: bool = False
@@ -242,6 +243,7 @@ ALIASES = {
     "TP_EXTRA_GRIDS": "tp_extra_grids",
     "CAPITAL_DISPONIVEL_USDT": "capital_disponivel_usdt",
     "CAPITAL_REFERENCIA_USDT": "capital_referencia_usdt",
+    "CAPITAL_GRID_BUFFER_PCT": "capital_grid_buffer_pct",
     "MAX_POR_PAR": "max_por_par",
     "PREALERT_TELEGRAM": "prealert_telegram",
     "BOT_WATCH_AUTOMATICO": "bot_watch_automatico",
@@ -1094,6 +1096,9 @@ def run_scan(args):
                 sl_buffer_ticks=params["sl_buffer_ticks"],
                 trailing_up_steps=params["trailing_up_steps"],
                 tp_extra_grids=params["tp_extra_grids"],
+                min_order_amt=_to_float(row.get("MinOrderAmt")),
+                capital_limit_usdt=cfg.capital_referencia_usdt,
+                capital_buffer_pct=cfg.capital_grid_buffer_pct,
             )
 
         if direction == "COMPRA" and low_setup is None:
@@ -1121,6 +1126,7 @@ def run_scan(args):
             "LOW_SETUP": low_setup,
             "CANDLE_SETUP_TS": candle_setup_ts,
             "TICK_SIZE": tick_size,
+            "MIN_ORDER_AMT": _to_float(row.get("MinOrderAmt")),
             "GRID_MODEL": "LOW_SETUP_TRAILING_V1",
             "DIST_GATILHO_PCT": (current / trigger - 1) * 100 if trigger else np.nan,
             "ATR_PERIOD": params["atr_period"],
