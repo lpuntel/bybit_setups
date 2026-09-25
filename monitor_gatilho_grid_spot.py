@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.4.0
+# Monitor Spot Grid v3.3.0
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -421,8 +421,6 @@ def grid_dict(row):
         "TS_RETRACAO_PCT", "TRAILING_UP", "TRAILING_UP_LIMIT",
         "TRAILING_UP_STEPS", "TP_EXTRA_GRIDS", "LOW_SETUP",
         "ESTRATEGIA_GRID", "REGIME_SPOT", "ATR_PCT_SPOT",
-        "GRIDS_TECNICOS", "GRID_CAPITAL_CAP", "MIN_ORDER_AMT",
-        "CAPITAL_LIMIT_USDT", "CAPITAL_BUFFER_PCT", "CAPITAL_MIN_EST_USDT",
     ]
     return {k: row.get(k) for k in keys if k in row.index}
 
@@ -452,7 +450,6 @@ def technical_revalidation(row, cfg, current_price=None):
     original_trigger = _float(row.get("GATILHO"))
     original_low_setup = _float(row.get("LOW_SETUP"))
     tick_size = _float(row.get("TICK_SIZE"))
-    min_order_amt = _float(row.get("MIN_ORDER_AMT"))
     decision = str(row.get("DECISAO_SPOT", "")).strip().upper()
 
     limit = min(
@@ -540,8 +537,6 @@ def technical_revalidation(row, cfg, current_price=None):
         reasons.append("low_setup_indisponivel")
     if tick_size is None or tick_size <= 0:
         reasons.append("tick_size_indisponivel")
-    if min_order_amt is None or min_order_amt <= 0:
-        reasons.append("min_order_amt_indisponivel")
 
     effective_trigger = original_trigger
     effective_low_setup = original_low_setup
@@ -627,9 +622,6 @@ def technical_revalidation(row, cfg, current_price=None):
             sl_buffer_ticks=cfg.sl_buffer_ticks,
             trailing_up_steps=cfg.trailing_up_steps,
             tp_extra_grids=cfg.tp_extra_grids,
-            min_order_amt=min_order_amt,
-            capital_limit_usdt=cfg.capital_referencia_usdt,
-            capital_buffer_pct=cfg.capital_grid_buffer_pct,
         )
 
         if not grid_now:
@@ -653,7 +645,6 @@ def technical_revalidation(row, cfg, current_price=None):
         "atr_pct_atual": atr_pct_real,
         "atr_m1_atual": atr_m1,
         "slope_atual": slope_now,
-        "min_order_amt": min_order_amt,
         "grid_atual": grid_now,
         "warnings": warnings,
         "candle_fechado": str(last_closed.get("timestamp", "")),
@@ -756,8 +747,6 @@ def build_ready_message(row, last, ctx, grid, technical_info):
         f"Grids: {_fmt_int(grid.get('GRIDS'))} | "
         f"Intervalo: {_fmt_price(grid.get('GRID_INTERVAL_PRICE'))} | "
         f"Líq/grid est.: {_fmt_pct_value(grid.get('GRID_NET_EST_PCT'))}\n"
-        f"Capital mín. est.: {_fmt_price(grid.get('CAPITAL_MIN_EST_USDT'))} USDT | "
-        f"Limite: {_fmt_price(grid.get('CAPITAL_LIMIT_USDT'))} USDT\n"
         f"\nTS retração: {_fmt_pct_value(grid.get('TS_RETRACAO_PCT'), 2)}\n"
         f"\nGatilho: {_fmt_price(trigger_now)} | Preço Atual = {_fmt_price(last)}\n"
         f"\n{trailing_line}\n"
@@ -1734,7 +1723,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.4.0")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.3.0")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
