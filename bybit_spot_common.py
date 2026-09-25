@@ -153,6 +153,9 @@ def spot_grid_parameters(
     sl_buffer_ticks: int = 2,
     trailing_up_steps: int = 3,
     tp_extra_grids: int = 1,
+    min_order_amt: float | None = None,
+    capital_limit_usdt: float | None = None,
+    capital_buffer_pct: float = 20.0,
 ) -> dict:
     # Modelo Spot Grid ancorado no candle do setup.
     # LOWER = LOW_SETUP; SL fica N ticks abaixo.
@@ -189,8 +192,45 @@ def spot_grid_parameters(
     width_pct = (upper - lower) / entry * 100.0
 
     min_spacing = max(0.01, 2 * fee_side_pct + min_net_grid_pct)
-    grids = math.floor(width_pct / min_spacing)
-    grids = max(int(min_grids), min(int(max_grids), grids))
+    technical_grids = math.floor(width_pct / min_spacing)
+    technical_grids = max(
+        int(min_grids),
+        min(int(max_grids), technical_grids),
+    )
+
+    grids = technical_grids
+    capital_grid_cap = None
+    capital_min_est = None
+    min_order_value = (
+        float(min_order_amt)
+        if min_order_amt is not None and float(min_order_amt) > 0
+        else None
+    )
+    capital_limit = (
+        float(capital_limit_usdt)
+        if capital_limit_usdt is not None and float(capital_limit_usdt) > 0
+        else None
+    )
+    capital_safety_factor = 1.0 + max(0.0, float(capital_buffer_pct or 0.0)) / 100.0
+
+    if min_order_value is not None and capital_limit is not None:
+        # Estimativa conservadora do mínimo necessário:
+        # cada grid precisa atender MinOrderAmt e os grids mantêm a mesma
+        # quantidade do ativo-base. Upper/Lower cobre o maior valor nocional
+        # da mesma quantidade dentro da faixa; o buffer absorve fees/rounding
+        # e diferenças da fórmula interna do Spot Grid da Bybit.
+        conservative_per_grid = (
+            min_order_value
+            * (upper / lower)
+            * capital_safety_factor
+        )
+        capital_grid_cap = math.floor(capital_limit / conservative_per_grid)
+
+        if capital_grid_cap < int(min_grids):
+            return {}
+
+        grids = min(technical_grids, int(capital_grid_cap))
+        capital_min_est = grids * conservative_per_grid
 
     interval_price = (upper - lower) / grids
     spacing_pct = interval_price / entry * 100.0
@@ -232,6 +272,8 @@ def spot_grid_parameters(
         "LOWER": lower,
         "UPPER": upper,
         "GRIDS": grids,
+        "GRIDS_TECNICOS": technical_grids,
+        "GRID_CAPITAL_CAP": capital_grid_cap,
         "GRID_INTERVAL_PRICE": interval_price,
         "GRID_SPACING_PCT": spacing_pct,
         "GRID_NET_EST_PCT": max(0.0, spacing_pct - 2 * fee_side_pct),
@@ -246,4 +288,8 @@ def spot_grid_parameters(
         "ESTRATEGIA_GRID": "TRAILING_UP" if trailing_up else "NORMAL",
         "REGIME_SPOT": regime,
         "ATR_PCT_SPOT": atr_pct,
+        "MIN_ORDER_AMT": min_order_value,
+        "CAPITAL_LIMIT_USDT": capital_limit,
+        "CAPITAL_BUFFER_PCT": float(capital_buffer_pct or 0.0),
+        "CAPITAL_MIN_EST_USDT": capital_min_est,
     }
