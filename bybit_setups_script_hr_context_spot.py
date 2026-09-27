@@ -1080,6 +1080,7 @@ def run_scan(args):
         score = score_spot_candidate(direction, setup, last_closed, context, rs_map.get(key), cfg)
 
         grid = {}
+        capital_fit_failed = False
         base_precision = _to_float(row.get("BasePrecision"))
         if direction == "COMPRA" and low_setup is not None and low_setup < trigger:
             grid = spot_grid_parameters(
@@ -1142,9 +1143,12 @@ def run_scan(args):
                         grid["GRIDS"] = capital_grids
                 else:
                     grid = {}
+                    capital_fit_failed = True
 
         if direction == "COMPRA" and low_setup is None:
             valid, invalid_reason = False, "low_setup_indisponivel"
+        elif direction == "COMPRA" and capital_fit_failed:
+            valid, invalid_reason = False, "capital_grid_inviavel"
         elif direction == "COMPRA" and not grid:
             valid, invalid_reason = False, "grid_invalido_low_setup"
         else:
