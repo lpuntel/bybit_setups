@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.3.0
+# Monitor Spot Grid v3.4.0-capital-est
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -14,7 +14,13 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from bybit_spot_common import get_ticker, get_kline, normalize_timeframe, spot_grid_parameters
+from bybit_spot_common import (
+    get_ticker,
+    get_kline,
+    normalize_timeframe,
+    spot_grid_parameters,
+    max_spot_grids_for_capital,
+)
 from bybit_setups_script_hr_context_spot import (
     capturar_contexto_spot,
     escolher_setup_spot,
@@ -399,7 +405,7 @@ def load_candidates():
     required = {
         "Par", "Timeframe", "Setup", "SINAL_ORIGINAL",
         "DECISAO_SPOT", "GATILHO", "LOW_SETUP", "TICK_SIZE",
-        "APROVADO_SCORE", "PARAMETROS_BYBIT_VALIDOS",
+        "BASE_PRECISION", "APROVADO_SCORE", "PARAMETROS_BYBIT_VALIDOS",
     }
     missing = sorted(required - set(df.columns))
     if missing:
@@ -421,6 +427,10 @@ def grid_dict(row):
         "TS_RETRACAO_PCT", "TRAILING_UP", "TRAILING_UP_LIMIT",
         "TRAILING_UP_STEPS", "TP_EXTRA_GRIDS", "LOW_SETUP",
         "ESTRATEGIA_GRID", "REGIME_SPOT", "ATR_PCT_SPOT",
+        "GRIDS_TECNICOS", "GRIDS_CAPITAL",
+        "CAPITAL_MIN_EST_USDT", "CAPITAL_MIN_EST_RAW_USDT",
+        "CAPITAL_LIMIT_USDT", "CAPITAL_MODEL",
+        "CAPITAL_MODEL_SAFETY_PCT", "CAPITAL_MODEL_QTY_BASE",
     ]
     return {k: row.get(k) for k in keys if k in row.index}
 
@@ -450,6 +460,7 @@ def technical_revalidation(row, cfg, current_price=None):
     original_trigger = _float(row.get("GATILHO"))
     original_low_setup = _float(row.get("LOW_SETUP"))
     tick_size = _float(row.get("TICK_SIZE"))
+    base_precision = _float(row.get("BASE_PRECISION"))
     decision = str(row.get("DECISAO_SPOT", "")).strip().upper()
 
     limit = min(
@@ -537,6 +548,8 @@ def technical_revalidation(row, cfg, current_price=None):
         reasons.append("low_setup_indisponivel")
     if tick_size is None or tick_size <= 0:
         reasons.append("tick_size_indisponivel")
+    if base_precision is None or base_precision <= 0:
+        reasons.append("base_precision_indisponivel")
 
     effective_trigger = original_trigger
     effective_low_setup = original_low_setup
@@ -624,8 +637,51 @@ def technical_revalidation(row, cfg, current_price=None):
             tp_extra_grids=cfg.tp_extra_grids,
         )
 
+        if grid_now:
+            fit = max_spot_grids_for_capital(
+                lower=grid_now["LOWER"],
+                upper=grid_now["UPPER"],
+                technical_grids=grid_now["GRIDS"],
+                min_grids=cfg.min_grids,
+                current_price=current_price,
+                base_precision=base_precision,
+                capital_limit_usdt=cfg.capital_referencia_usdt,
+                fee_side_pct=cfg.fee_side_pct,
+                safety_pct=cfg.capital_grid_safety_pct,
+            )
+            if fit:
+                technical_grids = int(grid_now["GRIDS"])
+                capital_grids = int(fit["GRIDS_CAPITAL"])
+                if capital_grids != technical_grids:
+                    grid_now = spot_grid_parameters(
+                        entry=effective_trigger,
+                        atr=atr_m1,
+                        slope_pct=slope_now or 0.0,
+                        fee_side_pct=cfg.fee_side_pct,
+                        min_net_grid_pct=cfg.min_net_grid_pct,
+                        range_atr_down=cfg.range_atr_down,
+                        range_atr_up=cfg.range_atr_up,
+                        sl_buffer_atr=cfg.sl_buffer_atr,
+                        tp_buffer_atr=cfg.tp_buffer_atr,
+                        min_grids=cfg.min_grids,
+                        max_grids=capital_grids,
+                        trailing_slope_pct=cfg.slope_trailing_up_pct,
+                        low_setup=effective_low_setup,
+                        tick_size=tick_size,
+                        sl_buffer_ticks=cfg.sl_buffer_ticks,
+                        trailing_up_steps=cfg.trailing_up_steps,
+                        tp_extra_grids=cfg.tp_extra_grids,
+                    )
+                if grid_now:
+                    grid_now.update(fit)
+                    grid_now["GRIDS"] = capital_grids
+            else:
+                grid_now = {}
+                reasons.append("capital_grid_inviavel")
+
         if not grid_now:
-            reasons.append("grid_atual_invalido")
+            if "capital_grid_inviavel" not in reasons:
+                reasons.append("grid_atual_invalido")
             technical_state = "INVALIDADO"
 
     else:
@@ -645,6 +701,7 @@ def technical_revalidation(row, cfg, current_price=None):
         "atr_pct_atual": atr_pct_real,
         "atr_m1_atual": atr_m1,
         "slope_atual": slope_now,
+        "base_precision": base_precision,
         "grid_atual": grid_now,
         "warnings": warnings,
         "candle_fechado": str(last_closed.get("timestamp", "")),
@@ -744,9 +801,13 @@ def build_ready_message(row, last, ctx, grid, technical_info):
         f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
         f"\nFAIXA INICIAL / GRID\n"
         f"Lower: {_fmt_price(grid.get('LOWER'))} | Upper: {_fmt_price(grid.get('UPPER'))}\n"
-        f"Grids: {_fmt_int(grid.get('GRIDS'))} | "
+        f"Grids: {_fmt_int(grid.get('GRIDS'))} "
+        f"(técnicos: {_fmt_int(grid.get('GRIDS_TECNICOS'))}) | "
         f"Intervalo: {_fmt_price(grid.get('GRID_INTERVAL_PRICE'))} | "
         f"Líq/grid est.: {_fmt_pct_value(grid.get('GRID_NET_EST_PCT'))}\n"
+        f"Capital mín. estimado: {_fmt_price(grid.get('CAPITAL_MIN_EST_USDT'))} USDT "
+        f"| Limite: {_fmt_price(grid.get('CAPITAL_LIMIT_USDT'))} USDT\n"
+        f"Modelo capital: {grid.get('CAPITAL_MODEL') or '-'}\n"
         f"\nTS retração: {_fmt_pct_value(grid.get('TS_RETRACAO_PCT'), 2)}\n"
         f"\nGatilho: {_fmt_price(trigger_now)} | Preço Atual = {_fmt_price(last)}\n"
         f"\n{trailing_line}\n"
@@ -1723,7 +1784,7 @@ def once(tolerance_pct=1.0, dry_run=False, verbose=True):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.3.0")
+    p = argparse.ArgumentParser(description="Monitor Spot Grid v3.4.0-capital-est")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--tolerance-pct", type=float, default=1.0)
