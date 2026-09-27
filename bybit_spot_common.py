@@ -164,7 +164,8 @@ def estimate_spot_grid_min_investment(
         return {}
 
     if (
-        lower <= 0
+        not all(math.isfinite(x) for x in (lower, upper, current_price, base_precision))
+        or lower <= 0
         or upper <= lower
         or grids < 2
         or current_price <= 0
