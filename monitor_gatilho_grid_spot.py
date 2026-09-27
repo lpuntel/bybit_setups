@@ -548,7 +548,11 @@ def technical_revalidation(row, cfg, current_price=None):
         reasons.append("low_setup_indisponivel")
     if tick_size is None or tick_size <= 0:
         reasons.append("tick_size_indisponivel")
-    if base_precision is None or base_precision <= 0:
+    if (
+        base_precision is None
+        or pd.isna(base_precision)
+        or base_precision <= 0
+    ):
         reasons.append("base_precision_indisponivel")
 
     effective_trigger = original_trigger
