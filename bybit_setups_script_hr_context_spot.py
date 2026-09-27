@@ -1082,6 +1082,11 @@ def run_scan(args):
         grid = {}
         capital_fit_failed = False
         base_precision = _to_float(row.get("BasePrecision"))
+        base_precision_ok = (
+            base_precision is not None
+            and not pd.isna(base_precision)
+            and base_precision > 0
+        )
         if direction == "COMPRA" and low_setup is not None and low_setup < trigger:
             grid = spot_grid_parameters(
                 entry=trigger,
@@ -1103,7 +1108,10 @@ def run_scan(args):
                 tp_extra_grids=params["tp_extra_grids"],
             )
 
-            if grid and base_precision and base_precision > 0 and cfg.capital_referencia_usdt > 0:
+            if grid and cfg.capital_referencia_usdt > 0 and not base_precision_ok:
+                grid = {}
+                capital_fit_failed = True
+            elif grid and base_precision_ok and cfg.capital_referencia_usdt > 0:
                 fit = max_spot_grids_for_capital(
                     lower=grid["LOWER"],
                     upper=grid["UPPER"],
