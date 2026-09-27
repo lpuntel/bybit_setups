@@ -164,7 +164,10 @@ def log_scanner_candidate(result: Mapping[str, Any]):
             "TRAILING_UP", "TRAILING_UP_LIMIT",
             "TRAILING_UP_STEPS", "TP_EXTRA_GRIDS",
             "TS_RETRACAO_PCT", "REGIME_SPOT",
-            "ATR_PCT_SPOT",
+            "ATR_PCT_SPOT", "GRIDS_TECNICOS", "GRIDS_CAPITAL",
+            "CAPITAL_MIN_EST_USDT", "CAPITAL_MIN_EST_RAW_USDT",
+            "CAPITAL_LIMIT_USDT", "CAPITAL_MODEL",
+            "CAPITAL_MODEL_SAFETY_PCT", "CAPITAL_MODEL_QTY_BASE",
         ]
 
         payload = {

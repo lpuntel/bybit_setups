@@ -135,6 +135,145 @@ def market_microstructure(symbol: str, depth_levels: int = 50) -> dict:
     }
 
 
+def estimate_spot_grid_min_investment(
+    lower: float,
+    upper: float,
+    grids: int,
+    current_price: float,
+    base_precision: float,
+    fee_side_pct: float = 0.10,
+    min_grid_notional_usdt: float = 1.05,
+    profit_precision_factor: float = 1.25,
+    safety_pct: float = 1.0,
+) -> dict:
+    """
+    Estimador empírico e conservador do investimento mínimo do Spot Grid.
+
+    IMPORTANTE:
+    - Não é a fórmula oficial da Bybit.
+    - Foi calibrado contra valores exibidos pela interface do Spot Grid.
+    - Serve apenas como trava operacional read-only antes do alerta.
+    """
+    try:
+        lower = float(lower)
+        upper = float(upper)
+        grids = int(grids)
+        current_price = float(current_price)
+        base_precision = float(base_precision)
+    except Exception:
+        return {}
+
+    if (
+        not all(math.isfinite(x) for x in (lower, upper, current_price, base_precision))
+        or lower <= 0
+        or upper <= lower
+        or grids < 2
+        or current_price <= 0
+        or base_precision <= 0
+    ):
+        return {}
+
+    interval = (upper - lower) / grids
+    fee = max(0.0, float(fee_side_pct or 0.0)) / 100.0
+
+    # Aproxima o ganho líquido por unidade do ativo-base em um ciclo.
+    # O termo de duas pernas representa compra + venda.
+    net_unit_profit = interval - fee * (2.0 * current_price + interval)
+    if net_unit_profit <= 0:
+        return {}
+
+    # Dois pisos empíricos:
+    # 1) valor nocional mínimo efetivo observado por grid;
+    # 2) quantidade suficiente para sobreviver a precisão/arredondamento
+    #    e às duas pernas de fee no lucro líquido do grid.
+    qty_notional = float(min_grid_notional_usdt) / lower
+    qty_precision_profit = (
+        float(profit_precision_factor)
+        * base_precision
+        * current_price
+        / net_unit_profit
+    )
+
+    qty_raw = max(qty_notional, qty_precision_profit)
+    qty = math.ceil((qty_raw / base_precision) - 1e-12) * base_precision
+
+    # A Bybit não abre ordem inicial exatamente no nível que contém o
+    # preço atual. Abaixo ficam ordens de compra; acima, estoque-base
+    # necessário para sustentar as vendas iniciais.
+    buy_quote = 0.0
+    sell_count = 0
+    for i in range(1, grids + 1):
+        level = lower + i * interval
+        if level < current_price:
+            buy_quote += level
+        elif level > current_price:
+            sell_count += 1
+
+    allocation_factor = buy_quote + sell_count * current_price
+    if allocation_factor <= 0:
+        return {}
+
+    raw_estimate = qty * allocation_factor
+    estimate = raw_estimate * (1.0 + max(0.0, float(safety_pct or 0.0)) / 100.0)
+
+    return {
+        "CAPITAL_MIN_EST_USDT": estimate,
+        "CAPITAL_MIN_EST_RAW_USDT": raw_estimate,
+        "CAPITAL_MODEL": "BYBIT_UI_EMPIRICO_V1",
+        "CAPITAL_MODEL_SAFETY_PCT": float(safety_pct or 0.0),
+        "CAPITAL_MODEL_QTY_BASE": qty,
+        "CAPITAL_MODEL_NET_UNIT_PROFIT": net_unit_profit,
+    }
+
+
+def max_spot_grids_for_capital(
+    lower: float,
+    upper: float,
+    technical_grids: int,
+    min_grids: int,
+    current_price: float,
+    base_precision: float,
+    capital_limit_usdt: float,
+    fee_side_pct: float = 0.10,
+    safety_pct: float = 1.0,
+) -> dict:
+    """
+    Procura, do maior para o menor, o número de grids cujo investimento
+    mínimo estimado caiba no teto informado.
+    """
+    try:
+        technical_grids = int(technical_grids)
+        min_grids = int(min_grids)
+        capital_limit_usdt = float(capital_limit_usdt)
+    except Exception:
+        return {}
+
+    if technical_grids < min_grids or capital_limit_usdt <= 0:
+        return {}
+
+    for grids in range(technical_grids, min_grids - 1, -1):
+        est = estimate_spot_grid_min_investment(
+            lower=lower,
+            upper=upper,
+            grids=grids,
+            current_price=current_price,
+            base_precision=base_precision,
+            fee_side_pct=fee_side_pct,
+            safety_pct=safety_pct,
+        )
+        if not est:
+            continue
+        if est["CAPITAL_MIN_EST_USDT"] <= capital_limit_usdt:
+            return {
+                **est,
+                "GRIDS_CAPITAL": grids,
+                "GRIDS_TECNICOS": technical_grids,
+                "CAPITAL_LIMIT_USDT": capital_limit_usdt,
+            }
+
+    return {}
+
+
 def spot_grid_parameters(
     entry: float,
     atr: float,

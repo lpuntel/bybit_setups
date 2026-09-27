@@ -39,6 +39,7 @@ from bybit_spot_common import (
     get_spot_tickers,
     normalize_timeframe,
     spot_grid_parameters,
+    max_spot_grids_for_capital,
 )
 from optimizer_atr_sl_tp_spot import run_optimization_with_setups
 from spot_research_log import log_scanner_candidate
@@ -126,6 +127,7 @@ class SpotContextConfig:
     # Priorização operacional / Telegram
     capital_disponivel_usdt: float = 300.0
     capital_referencia_usdt: float = 50.0
+    capital_grid_safety_pct: float = 1.0
     max_por_par: int = 1
     prealert_telegram: bool = False
     bot_watch_automatico: bool = False
@@ -242,6 +244,7 @@ ALIASES = {
     "TP_EXTRA_GRIDS": "tp_extra_grids",
     "CAPITAL_DISPONIVEL_USDT": "capital_disponivel_usdt",
     "CAPITAL_REFERENCIA_USDT": "capital_referencia_usdt",
+    "CAPITAL_GRID_SAFETY_PCT": "capital_grid_safety_pct",
     "MAX_POR_PAR": "max_por_par",
     "PREALERT_TELEGRAM": "prealert_telegram",
     "BOT_WATCH_AUTOMATICO": "bot_watch_automatico",
@@ -467,6 +470,8 @@ def montar_universo_spot(manual_df: pd.DataFrame, cfg: SpotContextConfig):
             "Historico_Referencia_UTC": historico_ref,
             "Historico_Status": historico_status,
             "TickSize": price_filter.get("tickSize"),
+            "BasePrecision": lot.get("basePrecision"),
+            "QuotePrecision": lot.get("quotePrecision"),
             "MinOrderQty": lot.get("minOrderQty"),
             "MinOrderAmt": lot.get("minOrderAmt"),
             "LastPrice": last,
@@ -1075,6 +1080,13 @@ def run_scan(args):
         score = score_spot_candidate(direction, setup, last_closed, context, rs_map.get(key), cfg)
 
         grid = {}
+        capital_fit_failed = False
+        base_precision = _to_float(row.get("BasePrecision"))
+        base_precision_ok = (
+            base_precision is not None
+            and not pd.isna(base_precision)
+            and base_precision > 0
+        )
         if direction == "COMPRA" and low_setup is not None and low_setup < trigger:
             grid = spot_grid_parameters(
                 entry=trigger,
@@ -1096,8 +1108,55 @@ def run_scan(args):
                 tp_extra_grids=params["tp_extra_grids"],
             )
 
+            if grid and cfg.capital_referencia_usdt > 0 and not base_precision_ok:
+                grid = {}
+                capital_fit_failed = True
+            elif grid and base_precision_ok and cfg.capital_referencia_usdt > 0:
+                fit = max_spot_grids_for_capital(
+                    lower=grid["LOWER"],
+                    upper=grid["UPPER"],
+                    technical_grids=grid["GRIDS"],
+                    min_grids=cfg.min_grids,
+                    current_price=current,
+                    base_precision=base_precision,
+                    capital_limit_usdt=cfg.capital_referencia_usdt,
+                    fee_side_pct=cfg.fee_side_pct,
+                    safety_pct=cfg.capital_grid_safety_pct,
+                )
+                if fit:
+                    technical_grids = int(grid["GRIDS"])
+                    capital_grids = int(fit["GRIDS_CAPITAL"])
+                    if capital_grids != technical_grids:
+                        grid = spot_grid_parameters(
+                            entry=trigger,
+                            atr=atr_m1,
+                            slope_pct=slope,
+                            fee_side_pct=cfg.fee_side_pct,
+                            min_net_grid_pct=params["min_net_grid_pct"],
+                            range_atr_down=cfg.range_atr_down,
+                            range_atr_up=params["range_atr_up"],
+                            sl_buffer_atr=cfg.sl_buffer_atr,
+                            tp_buffer_atr=cfg.tp_buffer_atr,
+                            min_grids=cfg.min_grids,
+                            max_grids=capital_grids,
+                            trailing_slope_pct=params["trailing_slope_pct"],
+                            low_setup=low_setup,
+                            tick_size=tick_size,
+                            sl_buffer_ticks=params["sl_buffer_ticks"],
+                            trailing_up_steps=params["trailing_up_steps"],
+                            tp_extra_grids=params["tp_extra_grids"],
+                        )
+                    if grid:
+                        grid.update(fit)
+                        grid["GRIDS"] = capital_grids
+                else:
+                    grid = {}
+                    capital_fit_failed = True
+
         if direction == "COMPRA" and low_setup is None:
             valid, invalid_reason = False, "low_setup_indisponivel"
+        elif direction == "COMPRA" and capital_fit_failed:
+            valid, invalid_reason = False, "capital_grid_inviavel"
         elif direction == "COMPRA" and not grid:
             valid, invalid_reason = False, "grid_invalido_low_setup"
         else:
@@ -1121,6 +1180,7 @@ def run_scan(args):
             "LOW_SETUP": low_setup,
             "CANDLE_SETUP_TS": candle_setup_ts,
             "TICK_SIZE": tick_size,
+            "BASE_PRECISION": base_precision,
             "GRID_MODEL": "LOW_SETUP_TRAILING_V1",
             "DIST_GATILHO_PCT": (current / trigger - 1) * 100 if trigger else np.nan,
             "ATR_PERIOD": params["atr_period"],
