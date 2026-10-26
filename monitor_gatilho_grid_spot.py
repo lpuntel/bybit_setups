@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.4.0-capital-est
+# Monitor Spot Grid v3.4.1-capital-est
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -396,28 +396,158 @@ def _priority_sort_key(item):
     )
 
 
+# === PATCH MONITOR DECISAO FINAL SPOT V1 ===
 def load_candidates():
+    """
+    Carrega somente oportunidades operacionais aprovadas pelo
+    scanner Spot.
+
+    DECISAO_FINAL_SPOT é a fonte de verdade operacional.
+
+    Para preservar todo o restante do monitor, convertemos os
+    estados finais para os estados legados internamente:
+
+        GRID_PRONTO       -> GRID
+        PROXIMO_GATILHO   -> AGUARDAR_GATILHO
+        AGUARDAR_GATILHO  -> AGUARDAR_GATILHO
+
+    Estados bloqueados, vendas e disparos fora da faixa de 1%
+    não entram como novas oportunidades.
+    """
     if not SCAN_FILE.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {SCAN_FILE}")
+        raise FileNotFoundError(
+            f"Arquivo não encontrado: {SCAN_FILE}"
+        )
 
-    df = pd.read_excel(SCAN_FILE, sheet_name=SHEET)
-
-    required = {
-        "Par", "Timeframe", "Setup", "SINAL_ORIGINAL",
-        "DECISAO_SPOT", "GATILHO", "LOW_SETUP", "TICK_SIZE",
-        "BASE_PRECISION", "APROVADO_SCORE", "PARAMETROS_BYBIT_VALIDOS",
-    }
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise RuntimeError(f"Colunas ausentes em {SHEET}: {missing}")
-
-    mask = (
-        df["SINAL_ORIGINAL"].astype(str).str.upper().eq("COMPRA")
-        & df["APROVADO_SCORE"].apply(_bool)
-        & df["DECISAO_SPOT"].isin(["GRID", "AGUARDAR_GATILHO"])
+    df = pd.read_excel(
+        SCAN_FILE,
+        sheet_name=SHEET,
     )
 
-    return df.loc[mask].copy()
+    required = {
+        "Par",
+        "Timeframe",
+        "Setup",
+        "SINAL_ORIGINAL",
+        "DECISAO_SPOT",
+        "DECISAO_FINAL_SPOT",
+        "GATILHO",
+        "LOW_SETUP",
+        "TICK_SIZE",
+        "BASE_PRECISION",
+        "APROVADO_SCORE",
+        "PARAMETROS_BYBIT_VALIDOS",
+        "PARAMETROS_BYBIT_VALIDOS_FINAL",
+        "MODO_ENTRADA_BYBIT",
+    }
+
+    missing = sorted(required - set(df.columns))
+
+    if missing:
+        raise RuntimeError(
+            f"Colunas ausentes em {SHEET}: {missing}"
+        )
+
+    finais_monitorados = {
+        "GRID_PRONTO",
+        "PROXIMO_GATILHO",
+        "AGUARDAR_GATILHO",
+    }
+
+    decisao_final = (
+        df["DECISAO_FINAL_SPOT"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    mask = (
+        df["SINAL_ORIGINAL"]
+        .astype(str)
+        .str.upper()
+        .eq("COMPRA")
+        & df["APROVADO_SCORE"].apply(_bool)
+        & decisao_final.isin(finais_monitorados)
+    )
+
+    out = df.loc[mask].copy()
+
+    # --------------------------------------------------------------
+    # Preserva os valores originais para auditoria/log.
+    # --------------------------------------------------------------
+    out["DECISAO_SPOT_TECNICA"] = out["DECISAO_SPOT"]
+
+    out[
+        "PARAMETROS_BYBIT_VALIDOS_ORIGINAL"
+    ] = out["PARAMETROS_BYBIT_VALIDOS"]
+
+    if "PARAMETROS_BYBIT_MOTIVO" in out.columns:
+        out[
+            "PARAMETROS_BYBIT_MOTIVO_ORIGINAL"
+        ] = out["PARAMETROS_BYBIT_MOTIVO"]
+
+    # --------------------------------------------------------------
+    # Camada de compatibilidade.
+    # O restante do monitor continua entendendo somente:
+    # GRID / AGUARDAR_GATILHO.
+    # --------------------------------------------------------------
+    mapa_decisao = {
+        "GRID_PRONTO": "GRID",
+        "PROXIMO_GATILHO": "AGUARDAR_GATILHO",
+        "AGUARDAR_GATILHO": "AGUARDAR_GATILHO",
+    }
+
+    out["DECISAO_SPOT"] = (
+        out["DECISAO_FINAL_SPOT"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .map(mapa_decisao)
+    )
+
+    # --------------------------------------------------------------
+    # GRID_PRONTO deve utilizar a validação FINAL.
+    #
+    # Isto é especialmente importante para START_NOW:
+    #
+    #   original:
+    #     PARAMETROS_BYBIT_VALIDOS = False
+    #     motivo = entry_acima_mercado
+    #
+    #   final:
+    #     PARAMETROS_BYBIT_VALIDOS_FINAL = True
+    #     MODO_ENTRADA_BYBIT = START_NOW
+    # --------------------------------------------------------------
+    pronto = (
+        out["DECISAO_FINAL_SPOT"]
+        .astype(str)
+        .str.upper()
+        .eq("GRID_PRONTO")
+    )
+
+    out.loc[
+        pronto,
+        "PARAMETROS_BYBIT_VALIDOS",
+    ] = out.loc[
+        pronto,
+        "PARAMETROS_BYBIT_VALIDOS_FINAL",
+    ].apply(_bool)
+
+    if (
+        "PARAMETROS_BYBIT_MOTIVO_FINAL"
+        in out.columns
+        and "PARAMETROS_BYBIT_MOTIVO"
+        in out.columns
+    ):
+        out.loc[
+            pronto,
+            "PARAMETROS_BYBIT_MOTIVO",
+        ] = out.loc[
+            pronto,
+            "PARAMETROS_BYBIT_MOTIVO_FINAL",
+        ]
+
+    return out
 
 
 def grid_dict(row):
@@ -427,6 +557,9 @@ def grid_dict(row):
         "TS_RETRACAO_PCT", "TRAILING_UP", "TRAILING_UP_LIMIT",
         "TRAILING_UP_STEPS", "TP_EXTRA_GRIDS", "LOW_SETUP",
         "ESTRATEGIA_GRID", "REGIME_SPOT", "ATR_PCT_SPOT",
+        "DECISAO_FINAL_SPOT", "MODO_ENTRADA_BYBIT", "ENTRY_BYBIT",
+        "PARAMETROS_BYBIT_VALIDOS_FINAL",
+        "PARAMETROS_BYBIT_MOTIVO_FINAL",
         "GRIDS_TECNICOS", "GRIDS_CAPITAL",
         "CAPITAL_MIN_EST_USDT", "CAPITAL_MIN_EST_RAW_USDT",
         "CAPITAL_LIMIT_USDT", "CAPITAL_MODEL",
@@ -782,6 +915,45 @@ def build_ready_message(row, last, ctx, grid, technical_info):
     trailing = _bool(grid.get("TRAILING_UP"))
     trailing_limit = grid.get("TRAILING_UP_LIMIT")
 
+    # === PATCH ENTRY MODE V3.4.1 ===
+    modo_entrada = str(
+        row.get("MODO_ENTRADA_BYBIT", "") or ""
+    ).strip().upper()
+
+    entry_bybit = _float(
+        row.get("ENTRY_BYBIT")
+    )
+
+    if modo_entrada == "START_NOW":
+        entrada_line = (
+            "Entrada Bybit: START NOW / SEM ENTRY PRICE\n"
+            "Ação: configurar o Grid para iniciar ao preço de mercado.\n"
+        )
+
+    elif modo_entrada == "ENTRY_PRICE":
+
+        if entry_bybit is None:
+            entry_bybit = _float(
+                grid.get("ENTRY")
+            )
+
+        entrada_line = (
+            "Entrada Bybit: ENTRY PRICE | "
+            f"{_fmt_price(entry_bybit)}\n"
+        )
+
+    else:
+        # Setup que se tornou GRID PRONTO dinamicamente no monitor.
+        # Mantém o comportamento de aguardar o gatilho.
+        entry_fallback = _float(
+            grid.get("ENTRY")
+        )
+
+        entrada_line = (
+            "Entrada Bybit: ENTRY PRICE | "
+            f"{_fmt_price(entry_fallback)}\n"
+        )
+
     trailing_line = (
         f"Trailing Up: SIM | Limite: {_fmt_price(trailing_limit)} | "
         f"Reserva: {_fmt_int(grid.get('TRAILING_UP_STEPS'))} deslocamentos"
@@ -803,6 +975,7 @@ def build_ready_message(row, last, ctx, grid, technical_info):
         f"GRID PRONTO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
         f"{priority_line}"
         f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
+        f"{entrada_line}"
         f"\nFAIXA INICIAL / GRID\n"
         f"Lower: {_fmt_price(grid.get('LOWER'))} | Upper: {_fmt_price(grid.get('UPPER'))}\n"
         f"Grids: {_fmt_int(grid.get('GRIDS'))} "
@@ -849,6 +1022,15 @@ def _activation_row_snapshot(row, effective_trigger=None, effective_low=None, ef
         "LOW_SETUP": _float(effective_low, _float(row.get("LOW_SETUP"))),
         "TICK_SIZE": _float(row.get("TICK_SIZE")),
         "DECISAO_SPOT": str(row.get("DECISAO_SPOT", "")),
+        "DECISAO_FINAL_SPOT": str(
+            row.get("DECISAO_FINAL_SPOT", "")
+        ),
+        "MODO_ENTRADA_BYBIT": str(
+            row.get("MODO_ENTRADA_BYBIT", "")
+        ),
+        "ENTRY_BYBIT": _float(
+            row.get("ENTRY_BYBIT")
+        ),
         "ATR_PERIOD": int(_float(row.get("ATR_PERIOD"), 14) or 14),
         "CANDLE_SETUP_TS": str(
             effective_setup_ts
@@ -927,9 +1109,23 @@ def _start_activation_watch(rec, row, effective_trigger, technical_info=None):
     effective_low = technical_info.get("low_setup_atual")
     effective_setup_ts = technical_info.get("candle_setup_ts_atual")
 
-    rec["activation_state"] = "AGUARDANDO_ATIVACAO"
+    modo_entrada_activation = str(
+        row.get("MODO_ENTRADA_BYBIT", "") or ""
+    ).strip().upper()
+
+    rec["activation_entry_mode"] = modo_entrada_activation
+    rec["activation_entry_price"] = _float(
+        row.get("ENTRY_BYBIT")
+    )
+
+    if modo_entrada_activation == "START_NOW":
+        rec["activation_state"] = "START_NOW_SEM_GATILHO"
+        rec["activation_watch_started_at"] = None
+    else:
+        rec["activation_state"] = "AGUARDANDO_ATIVACAO"
+        rec["activation_watch_started_at"] = now_iso
+
     rec["activation_trigger"] = _float(effective_trigger)
-    rec["activation_watch_started_at"] = now_iso
     rec["activation_par"] = str(row.get("Par", "")).strip().upper()
     rec["activation_timeframe"] = str(row.get("Timeframe", ""))
     rec["activation_setup"] = str(row.get("Setup", ""))

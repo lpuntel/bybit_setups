@@ -902,13 +902,13 @@ def gerar_excel(resultados, universo, forca, cfg):
 
     try:
         with pd.ExcelWriter(tmp_path, engine="xlsxwriter") as writer:
-            out.to_excel(writer, sheet_name="Setups Spot", index=False)
+            _spot_finalize_df(out, tolerancia_pct=1.0).to_excel(writer, sheet_name="Setups Spot", index=False)
 
             if universo is not None and not universo.empty:
-                universo.to_excel(writer, sheet_name="UNIVERSO_SPOT", index=False)
+                _spot_finalize_df(universo, tolerancia_pct=1.0).to_excel(writer, sheet_name="UNIVERSO_SPOT", index=False)
 
             if forca is not None and not forca.empty:
-                forca.to_excel(writer, sheet_name="FORCA_RELATIVA", index=False)
+                _spot_finalize_df(forca, tolerancia_pct=1.0).to_excel(writer, sheet_name="FORCA_RELATIVA", index=False)
 
             pd.DataFrame(
                 [{"Parametro": k, "Valor": v} for k, v in asdict(cfg).items()]
@@ -959,7 +959,8 @@ def gerar_excel(resultados, universo, forca, cfg):
                         "LOWER", "UPPER", "SL", "TP", "TRAILING_UP_LIMIT",
                         "GRID_INTERVAL_PRICE", "ATR_M1",
                     }:
-                        fmt = dec
+                        # === PATCH EXCEL PRECISION FLEX V1 ===
+                        fmt = writer.book.add_format({"num_format": "0.################"})
                     elif col in {
                         "SCORE_TOTAL", "SCORE_LIQUIDEZ", "SCORE_REGIME",
                         "SCORE_FORCA", "RANK_FORCA",
@@ -1257,6 +1258,273 @@ def test_api():
     if not candles.empty:
         print(candles[["timestamp", "open", "high", "low", "close"]].tail(3).to_string(index=False))
     return 0
+
+
+
+# === PATCH DECISAO FINAL SPOT V1 ===
+def _spot_bool_final(v):
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    try:
+        if pd.isna(v):
+            return False
+    except Exception:
+        pass
+    return str(v).strip().upper() in {
+        "TRUE", "VERDADEIRO", "1", "SIM", "YES"
+    }
+
+
+def _spot_text_final(v):
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
+
+
+def _spot_float_final(v, default=None):
+    if v is None:
+        return default
+
+    try:
+        if pd.isna(v):
+            return default
+    except Exception:
+        pass
+
+    if isinstance(v, (int, float)):
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    s = str(v).strip()
+
+    if not s:
+        return default
+
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+
+def _spot_bybit_final(row, allow_start_now=False):
+    """
+    Preserva a validação Bybit já feita pelo scanner.
+
+    Única exceção:
+      entry_acima_mercado
+
+    Se o setup já DISPAROU, está dentro da tolerância e todo o
+    restante está aprovado, a entrada na UI da Bybit deve ser
+    START NOW, sem informar Entry Price.
+    """
+    original_ok = _spot_bool_final(
+        row.get("PARAMETROS_BYBIT_VALIDOS")
+    )
+
+    motivo = _spot_text_final(
+        row.get("PARAMETROS_BYBIT_MOTIVO")
+    ).lower()
+
+    lower = _spot_float_final(row.get("LOWER"))
+    upper = _spot_float_final(row.get("UPPER"))
+    sl = _spot_float_final(row.get("SL"))
+
+    # Validação estrutural adicional.
+    if (
+        lower is not None
+        and upper is not None
+        and upper <= lower
+    ):
+        return (
+            False,
+            "upper_nao_maior_que_lower",
+            "",
+            None,
+        )
+
+    if (
+        lower is not None
+        and sl is not None
+        and sl >= lower
+    ):
+        return (
+            False,
+            "sl_nao_abaixo_lower",
+            "",
+            None,
+        )
+
+    if original_ok:
+        return (
+            True,
+            "",
+            "ENTRY_PRICE",
+            row.get("ENTRY"),
+        )
+
+    if (
+        allow_start_now
+        and motivo == "entry_acima_mercado"
+    ):
+        return (
+            True,
+            "start_now_preco_mercado",
+            "START_NOW",
+            None,
+        )
+
+    return (
+        False,
+        motivo or "parametros_bybit_invalidos",
+        "",
+        None,
+    )
+
+
+def _spot_decisao_final_row(row, tolerancia_pct=1.0):
+    sinal = _spot_text_final(
+        row.get("SINAL_ORIGINAL")
+    ).upper()
+
+    estado = _spot_text_final(
+        row.get("ARMAR/DISPARAR")
+    ).upper()
+
+    status = _spot_text_final(
+        row.get("STATUS_SCORE")
+    ).upper()
+
+    hard = _spot_text_final(
+        row.get("BLOQUEIO_HARD")
+    )
+
+    dist = _spot_float_final(
+        row.get("DIST_GATILHO_PCT")
+    )
+
+    # Spot não abre posição short.
+    if sinal == "VENDA":
+        if estado == "DISPARAR":
+            return "SAIR_NAO_ABRIR"
+        return "IGNORAR_VENDA"
+
+    if sinal != "COMPRA":
+        return "IGNORAR"
+
+    # Filtros finais têm precedência sobre a indicação técnica GRID.
+    if hard:
+        return "BLOQUEADO"
+
+    if status != "APROVADO":
+        return "BLOQUEADO"
+
+    if estado == "ARMAR":
+        if (
+            dist is not None
+            and abs(dist) <= tolerancia_pct
+        ):
+            return "PROXIMO_GATILHO"
+
+        return "AGUARDAR_GATILHO"
+
+    if estado == "DISPARAR":
+        if (
+            dist is None
+            or abs(dist) > tolerancia_pct
+        ):
+            return "DISPARADO_FORA_FAIXA"
+
+        ok, motivo, modo, entry = _spot_bybit_final(
+            row,
+            allow_start_now=True,
+        )
+
+        if not ok:
+            return "BLOQUEADO"
+
+        return "GRID_PRONTO"
+
+    return "IGNORAR"
+
+
+def _spot_finalize_df(df, tolerancia_pct=1.0):
+    """
+    Aplica a decisão operacional final somente ao dataframe
+    principal de setups. Outros dataframes/sheets passam intactos.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return df
+
+    obrigatorias = {
+        "SINAL_ORIGINAL",
+        "ARMAR/DISPARAR",
+        "DECISAO_SPOT",
+        "STATUS_SCORE",
+        "DIST_GATILHO_PCT",
+    }
+
+    if not obrigatorias.issubset(set(df.columns)):
+        return df
+
+    out = df.copy()
+
+    decisoes = []
+    modos = []
+    entries = []
+    validos = []
+    motivos = []
+
+    for _, row in out.iterrows():
+
+        decisao = _spot_decisao_final_row(
+            row,
+            tolerancia_pct=tolerancia_pct,
+        )
+
+        if decisao == "GRID_PRONTO":
+
+            ok, motivo, modo, entry = _spot_bybit_final(
+                row,
+                allow_start_now=True,
+            )
+
+            decisoes.append(decisao)
+            modos.append(modo)
+            entries.append(
+                None if modo == "START_NOW" else entry
+            )
+            validos.append(bool(ok))
+            motivos.append(motivo)
+
+        else:
+            decisoes.append(decisao)
+            modos.append("")
+            entries.append(None)
+            validos.append(False)
+            motivos.append("")
+
+    out["DECISAO_FINAL_SPOT"] = decisoes
+    out["MODO_ENTRADA_BYBIT"] = modos
+    out["ENTRY_BYBIT"] = entries
+    out["PARAMETROS_BYBIT_VALIDOS_FINAL"] = validos
+    out["PARAMETROS_BYBIT_MOTIVO_FINAL"] = motivos
+
+    return out
+
+
+# === FIM PATCH DECISAO FINAL SPOT V1 ===
 
 
 if __name__ == "__main__":
