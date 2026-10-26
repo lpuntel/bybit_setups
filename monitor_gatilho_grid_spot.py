@@ -1,4 +1,4 @@
-# Monitor Spot Grid v3.4.1-capital-est
+# Monitor Spot Grid v3.4.2-candle-window
 # Não envia ordens. Consome o resultado do scanner contextual Spot.
 
 from __future__ import annotations
@@ -111,6 +111,84 @@ def _fmt_setup_datetime(v):
     except Exception:
         s = str(v).strip()
         return s if s else "-"
+
+
+# === PATCH CANDLE WINDOW V3.4.2 ===
+def _timeframe_end(start, timeframe):
+    """Retorna o instante final do candle iniciado em start."""
+    ts = pd.to_datetime(start, utc=True)
+
+    tf = normalize_timeframe(timeframe)
+
+    if tf == "D":
+        return ts + pd.Timedelta(days=1)
+
+    if tf == "W":
+        return ts + pd.Timedelta(days=7)
+
+    if tf == "M":
+        return ts + pd.DateOffset(months=1)
+
+    return ts + pd.Timedelta(minutes=int(tf))
+
+
+def _fmt_candle_window(start, timeframe):
+    """
+    Exibe abertura e fechamento do candle em UTC-3.
+    O timestamp da Bybit é o startTime, isto é, a abertura.
+    """
+    if start is None:
+        return "-"
+
+    try:
+        inicio = pd.to_datetime(start, utc=True)
+
+        if pd.isna(inicio):
+            return "-"
+
+        fim = _timeframe_end(inicio, timeframe)
+
+        inicio_br = inicio - pd.Timedelta(hours=3)
+        fim_br = fim - pd.Timedelta(hours=3)
+
+        if inicio_br.date() == fim_br.date():
+            return (
+                f"{inicio_br.strftime('%d/%m/%Y %H:%M')}"
+                f"–{fim_br.strftime('%H:%M')} UTC-3"
+            )
+
+        return (
+            f"{inicio_br.strftime('%d/%m/%Y %H:%M')}"
+            f"–{fim_br.strftime('%d/%m/%Y %H:%M')} UTC-3"
+        )
+
+    except Exception:
+        return str(start)
+
+
+def _fmt_trigger_candle_window(setup_start, timeframe):
+    """Janela do candle imediatamente posterior ao candle de setup."""
+    if setup_start is None:
+        return "-"
+
+    try:
+        inicio_setup = pd.to_datetime(setup_start, utc=True)
+
+        if pd.isna(inicio_setup):
+            return "-"
+
+        inicio_disparo = _timeframe_end(
+            inicio_setup,
+            timeframe,
+        )
+
+        return _fmt_candle_window(
+            inicio_disparo,
+            timeframe,
+        )
+
+    except Exception:
+        return "-"
 
 
 def load_state():
@@ -715,6 +793,43 @@ def technical_revalidation(row, cfg, current_price=None):
         ):
             warnings.append("novo_gatilho_aguardando")
 
+    # === PATCH CANDLE WINDOW HOTFIX V1 ===
+    # A validação temporal só pode ocorrer DEPOIS que
+    # effective_candle_setup_ts foi recalculado pelo setup atual.
+    #
+    # Regra operacional:
+    #   [-1] último candle fechado = candle que arma/escorrega
+    #   [0]  candle em formação    = único candle que pode disparar
+    if (
+        signal
+        and direction == "COMPRA"
+        and setup_now == expected_setup
+    ):
+        try:
+            ts_ultimo_fechado = pd.to_datetime(
+                last_closed.get("timestamp"),
+                utc=True,
+            )
+
+            ts_setup_atual = pd.to_datetime(
+                effective_candle_setup_ts,
+                utc=True,
+            )
+
+            if (
+                pd.isna(ts_ultimo_fechado)
+                or pd.isna(ts_setup_atual)
+                or ts_setup_atual != ts_ultimo_fechado
+            ):
+                reasons.append(
+                    "setup_candle_nao_e_ultimo_fechado"
+                )
+
+        except Exception:
+            reasons.append(
+                "setup_candle_timestamp_invalido"
+            )
+
     if (
         effective_low_setup is not None
         and effective_trigger is not None
@@ -974,7 +1089,10 @@ def build_ready_message(row, last, ctx, grid, technical_info):
     return (
         f"GRID PRONTO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
         f"{priority_line}"
-        f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
+        f"Candle de Setup: "
+        f"{_fmt_candle_window(candle_setup_ts, row['Timeframe'])}\n"
+        f"Candle de Disparo: "
+        f"{_fmt_trigger_candle_window(candle_setup_ts, row['Timeframe'])}\n"
         f"{entrada_line}"
         f"\nFAIXA INICIAL / GRID\n"
         f"Lower: {_fmt_price(grid.get('LOWER'))} | Upper: {_fmt_price(grid.get('UPPER'))}\n"
@@ -1001,7 +1119,10 @@ def build_near_message(row, last, dist_pct, technical_info=None):
     )
     return (
         f"APROXIMANDO GATILHO | {row['Par']} {row['Timeframe']} | Setup {row['Setup']}\n"
-        f"Setup em: {_fmt_setup_datetime(candle_setup_ts)}\n"
+        f"Candle de Setup: "
+        f"{_fmt_candle_window(candle_setup_ts, row['Timeframe'])}\n"
+        f"Candle de Disparo: "
+        f"{_fmt_trigger_candle_window(candle_setup_ts, row['Timeframe'])}\n"
         f"Preço: {_fmt_price(last)}\n"
         f"Gatilho: {_fmt_price(row.get('GATILHO'))}\n"
         f"Distância: {dist_pct:.3f}%\n"
@@ -1152,7 +1273,10 @@ def build_bot_trigger_touched_message(rec, touch_price, touch_at):
         f"{rec.get('activation_par', '-')} "
         f"{rec.get('activation_timeframe', '-')} | "
         f"Setup {rec.get('activation_setup', '-')}\n"
-        f"Setup em: {_fmt_setup_datetime(rec.get('activation_setup_ts'))}\n"
+        f"Candle de Setup: "
+        f"{_fmt_candle_window(rec.get('activation_setup_ts'), rec.get('activation_timeframe'))}\n"
+        f"Candle de Disparo: "
+        f"{_fmt_trigger_candle_window(rec.get('activation_setup_ts'), rec.get('activation_timeframe'))}\n"
         f"GRID PRONTO em: "
         f"{_fmt_setup_datetime(rec.get('activation_watch_started_at'))}\n"
         f"\nGatilho do bot: {_fmt_price(rec.get('activation_trigger'))}\n"
@@ -1169,7 +1293,10 @@ def build_bot_not_triggered_message(rec):
         f"{rec.get('activation_par', '-')} "
         f"{rec.get('activation_timeframe', '-')} | "
         f"Setup {rec.get('activation_setup', '-')}\n"
-        f"Setup em: {_fmt_setup_datetime(rec.get('activation_setup_ts'))}\n"
+        f"Candle de Setup: "
+        f"{_fmt_candle_window(rec.get('activation_setup_ts'), rec.get('activation_timeframe'))}\n"
+        f"Candle de Disparo: "
+        f"{_fmt_trigger_candle_window(rec.get('activation_setup_ts'), rec.get('activation_timeframe'))}\n"
         f"GRID PRONTO em: "
         f"{_fmt_setup_datetime(rec.get('activation_watch_started_at'))}\n"
         f"\nGatilho do bot: {_fmt_price(rec.get('activation_trigger'))}\n"
